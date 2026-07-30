@@ -1,0 +1,120 @@
+{
+  "theme": {
+    "mode": "dark",
+    "archetype": "5 (Jewel & Luxury) infused with 2 (Performance Pro)",
+    "description": "Modern premium dark theme tailored for high-end snooker lounges. It blends the cinematic, moody depth of luxury with the high-visibility tactical precision of performance tracking. The interface uses deep obsidian blacks, very dark grays, and striking billiard green accents to mimic the felt of a snooker table under spotlight."
+  },
+  "colors": {
+    "background": "#0A0A0A",
+    "surface": {
+      "default": "#141414",
+      "hover": "#1C1C1C",
+      "active": "#242424"
+    },
+    "border": {
+      "default": "#262626",
+      "focus": "#15803d"
+    },
+    "brand": {
+      "primary": "#15803d",
+      "primary_hover": "#166534",
+      "primary_active": "#14532d"
+    },
+    "status": {
+      "available": "#22c55e",
+      "running": "#f59e0b",
+      "reserved": "#3b82f6",
+      "maintenance": "#ef4444"
+    },
+    "text": {
+      "primary": "#FAFAFA",
+      "secondary": "#A3A3A3",
+      "muted": "#737373"
+    }
+  },
+  "typography": {
+    "heading_font": "Manrope",
+    "body_font": "Figtree",
+    "mono_font": "JetBrains Mono",
+    "hierarchy": {
+      "h1": "text-4xl sm:text-5xl font-bold tracking-tight text-white",
+      "h2": "text-2xl sm:text-3xl font-semibold tracking-tight text-white",
+      "h3": "text-xl sm:text-2xl font-semibold text-white",
+      "h4": "text-lg sm:text-xl font-medium text-white",
+      "body": "text-base text-gray-300",
+      "small": "text-sm text-gray-400",
+      "overline": "text-xs font-bold uppercase tracking-[0.2em] text-gray-500",
+      "timer": "text-3xl font-mono font-bold tracking-wider"
+    }
+  },
+  "layout_and_spacing": {
+    "container": "max-w-7xl mx-auto px-4 sm:px-6 lg:px-8",
+    "grid": {
+      "kpi": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6",
+      "tables": "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6",
+      "snacks": "grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4"
+    },
+    "card_padding": "p-6",
+    "border_radius": {
+      "card": "rounded-2xl",
+      "button": "rounded-xl",
+      "input": "rounded-lg",
+      "badge": "rounded-full"
+    }
+  },
+  "surfaces_and_effects": {
+    "card": "bg-[#141414] border border-[#262626] shadow-sm",
+    "card_hover": "hover:bg-[#1C1C1C] hover:border-gray-700 transition-all duration-200",
+    "glass": "backdrop-blur-xl bg-black/60 border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.12)]",
+    "glow_active": "drop-shadow-[0_0_12px_rgba(245,158,11,0.3)]",
+    "focus_ring": "focus:outline-none focus:ring-2 focus:ring-green-700 focus:ring-offset-2 focus:ring-offset-[#0A0A0A]"
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-green-700 hover:bg-green-800 text-white h-12 px-6 font-semibold flex items-center justify-center gap-2 transition-all rounded-xl",
+      "secondary": "bg-[#262626] hover:bg-[#333333] text-white h-12 px-6 font-medium flex items-center justify-center gap-2 transition-all rounded-xl",
+      "danger": "bg-red-900/50 hover:bg-red-900 text-red-100 border border-red-800 h-12 px-6 rounded-xl transition-all"
+    },
+    "inputs": {
+      "default": "bg-[#0A0A0A] border border-[#262626] text-white h-12 px-4 rounded-lg placeholder-gray-600 focus:border-green-700 focus:ring-1 focus:ring-green-700 w-full"
+    },
+    "badges": {
+      "available": "bg-green-500/10 text-green-500 border border-green-500/20 px-3 py-1 text-xs font-bold uppercase tracking-wider rounded-full",
+      "running": "bg-amber-500/10 text-amber-500 border border-amber-500/20 px-3 py-1 text-xs font-bold uppercase tracking-wider rounded-full flex items-center gap-2",
+      "reserved": "bg-blue-500/10 text-blue-500 border border-blue-500/20 px-3 py-1 text-xs font-bold uppercase tracking-wider rounded-full",
+      "maintenance": "bg-red-500/10 text-red-500 border border-red-500/20 px-3 py-1 text-xs font-bold uppercase tracking-wider rounded-full"
+    },
+    "table_visual_card": {
+      "container": "relative flex flex-col justify-between h-56 bg-[#141414] border border-[#262626] rounded-2xl p-6 overflow-hidden transition-all",
+      "running_state": "border-amber-500/30 bg-gradient-to-b from-[#141414] to-amber-900/10",
+      "available_state": "hover:border-green-500/50 hover:shadow-[0_0_20px_rgba(34,197,94,0.1)]"
+    }
+  },
+  "media": {
+    "login_background": {
+      "url": "https://images.unsplash.com/photo-1593070962926-4169ebeece92?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA3MDR8MHwxfHNlYXJjaHwxfHxjaW5lbWF0aWMlMjBkYXJrJTIwc25vb2tlciUyMHRhYmxlfGVufDB8fHx8MTc3OTIyODA3N3ww&ixlib=rb-4.1.0&q=85",
+      "description": "Cinematic blue and black billiard table with dramatic top lighting, used for the login page split-screen background."
+    },
+    "snacks": {
+      "burger": "https://images.unsplash.com/photo-1764018601476-e5fac1f27893?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjh8MHwxfHNlYXJjaHwxfHxwcmVtaXVtJTIwYnVyZ2VyJTIwZGFyayUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzc5MjI4MDc3fDA&ixlib=rb-4.1.0&q=85",
+      "coffee": "https://images.unsplash.com/photo-1709416766239-bb28517d50c2?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MjJ8MHwxfHNlYXJjaHwxfHxjb2ZmZWUlMjBjdXAlMjBkYXJrJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3NzkyMjgwNzd8MA&ixlib=rb-4.1.0&q=85",
+      "coke": "https://images.unsplash.com/photo-1768254270166-bee57d6bfce1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2OTV8MHwxfHNlYXJjaHwxfHxjb2NhJTIwY29sYSUyMGNhbiUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3OTIyODA3OHww&ixlib=rb-4.1.0&q=85"
+    }
+  },
+  "iconography": {
+    "library": "@phosphor-icons/react",
+    "style": "Duotone or Regular weight for a modern, crisp appearance. Used heavily in the sidebar and dashboard KPI cards."
+  },
+  "testing": {
+    "requirement": "All interactive elements, forms, and major informational displays MUST use 'data-testid' attributes (e.g., data-testid='start-session-btn', data-testid='table-card-1')."
+  },
+  "instructions_to_main_agent": [
+    "Ensure the entire application forces the dark mode background (#0A0A0A). Do not use light mode or generic white backgrounds.",
+    "Use Phosphor Icons for all UI icons to maintain the premium feel.",
+    "Implement the 'Control Room' grid layout for the Admin Dashboard. KPIs should be dense, clear, and feature subtle green/red trend indicators.",
+    "For the Table Management view, the 'Running' state should prominently display a pulsing live timer (using font-mono) and the current estimated bill.",
+    "The Start/End Session dialogs must be clean. The hourly rate should be auto-fetched from the table settings and LOCKED in the UI (disabled input) so staff cannot edit it manually.",
+    "Invoice/Billing generation should render a clean, printable view that overrides dark mode styling via CSS @media print { ... } for standard white-paper printing.",
+    "Use Shadcn UI primitives but strictly override their default styles to match this dark, rounded (rounded-2xl/rounded-xl), large-button premium aesthetic."
+  ]
+}

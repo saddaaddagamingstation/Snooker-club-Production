@@ -1,0 +1,1432 @@
+from dotenv import load_dotenv
+from pathlib import Path
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+import os
+import uuid
+import logging
+import secrets
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional
+
+import bcrypt
+import jwt
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field, EmailStr
+
+# ---- DB ----
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+JWT_SECRET = os.environ['JWT_SECRET']
+JWT_ALG = "HS256"
+CLUB_NAME = os.environ.get('CLUB_NAME', 'Snooker Club')
+
+app = FastAPI(title="Snooker Club API")
+api = APIRouter(prefix="/api")
+security = HTTPBearer(auto_error=False)
+
+# ---- Helpers ----
+def hash_password(p: str) -> str:
+    return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
+
+def verify_password(p: str, h: str) -> bool:
+    try:
+        return bcrypt.checkpw(p.encode(), h.encode())
+    except Exception:
+        return False
+
+def create_token(user_id: str, email: str, role: str, days: int = 7) -> str:
+    payload = {
+        "sub": user_id, "email": email, "role": role,
+        "exp": datetime.now(timezone.utc) + timedelta(days=days),
+        "type": "access",
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+def iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+# ---- Models ----
+class LoginReq(BaseModel):
+    email: EmailStr
+    password: str
+
+class ForgotReq(BaseModel):
+    email: EmailStr
+
+class ResetReq(BaseModel):
+    token: str
+    password: str
+
+class TableIn(BaseModel):
+    table_number: str
+    table_name: str
+    hourly_rate: float
+    status: str = "available"  # available | running | reserved | maintenance
+
+class TableUpdate(BaseModel):
+    table_number: Optional[str] = None
+    table_name: Optional[str] = None
+    hourly_rate: Optional[float] = None
+    status: Optional[str] = None
+
+class SnackIn(BaseModel):
+    name: str
+    category: str
+    price: float
+    stock_quantity: int = 0
+    image_url: Optional[str] = None
+
+class SnackUpdate(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    price: Optional[float] = None
+    stock_quantity: Optional[int] = None
+    image_url: Optional[str] = None
+
+class SessionStart(BaseModel):
+    table_id: str
+    customer_name: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class SnackOrderItem(BaseModel):
+    snack_id: str
+    quantity: int
+
+class FreezeSnapshot(BaseModel):
+    end_time: str
+    duration_seconds: Optional[int] = None
+    duration_minutes: int
+    table_amount: float
+    snacks_amount: Optional[float] = None
+    grand_total_exact: Optional[float] = None
+    grand_total: Optional[int] = None
+
+class SessionEnd(BaseModel):
+    discount: float = 0.0
+    tax_percent: float = 0.0
+    payment_method: str = "cash"
+    payment_notes: Optional[str] = ""
+    payments: Optional[List[dict]] = None
+    freeze_snapshot: Optional[FreezeSnapshot] = None
+
+class FrameEnd(BaseModel):
+    winner: str
+    loser: str
+    paid_by: str
+    notes: Optional[str] = ""
+
+class FrameStart(BaseModel):
+    player_a: Optional[str] = ""
+    player_b: Optional[str] = ""
+
+# ---- Expense/Vendor models ----
+EXPENSE_CATEGORIES = {
+    "Fixed Expenses": ["Rent", "Salary", "Electricity", "Water", "Internet", "Security", "Insurance", "Software"],
+    "Equipment": ["Cloth", "Cushion", "Cue Repair", "Cue Tips", "Balls", "Chalk", "Pocket Repair", "Lighting"],
+    "Food & Beverage Purchases": ["Snacks", "Beverages", "Kitchen Supplies"],
+    "Operations": ["Cleaning", "Consumables", "Stationery"],
+    "Marketing": ["Ads", "Print", "Digital", "Events"],
+    "Maintenance": ["Table Service", "AC/HVAC", "Plumbing", "General"],
+    "Taxes & Finance": ["GST", "Bank Fees", "Interest"],
+    "Tournament Expenses": ["Prize Money", "Trophies", "Refreshments"],
+    "Miscellaneous": ["Other"],
+}
+PAYMENT_METHODS = ["cash", "upi", "card", "bank", "credit"]
+
+class ExpenseIn(BaseModel):
+    date: str  # ISO date
+    category: str
+    subcategory: Optional[str] = ""
+    amount: float
+    payment_method: str = "cash"
+    vendor_id: Optional[str] = None
+    vendor_name: Optional[str] = ""
+    notes: Optional[str] = ""
+    bill_url: Optional[str] = ""
+    recurring: bool = False
+    recurring_frequency: Optional[str] = None  # monthly | weekly | yearly
+
+class ExpenseUpdate(BaseModel):
+    date: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    amount: Optional[float] = None
+    payment_method: Optional[str] = None
+    vendor_id: Optional[str] = None
+    vendor_name: Optional[str] = None
+    notes: Optional[str] = None
+    bill_url: Optional[str] = None
+
+class VendorIn(BaseModel):
+    name: str
+    contact: Optional[str] = ""
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+    address: Optional[str] = ""
+    category: Optional[str] = ""
+    notes: Optional[str] = ""
+
+class RecurringIn(BaseModel):
+    name: str
+    category: str
+    subcategory: Optional[str] = ""
+    amount: float
+    payment_method: str = "cash"
+    vendor_id: Optional[str] = None
+    vendor_name: Optional[str] = ""
+    frequency: str = "monthly"  # monthly | weekly | yearly
+    day_of_month: int = 1
+    active: bool = True
+    notes: Optional[str] = ""
+
+# ---- Auth dependency ----
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not credentials or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALG])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+def require_admin(user=Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
+# Default staff permissions
+DEFAULT_STAFF_PERMISSIONS = {
+    "manage_tables": False,
+    "manage_snacks": False,
+    "manage_sessions": True,
+    "manage_expenses": False,
+    "view_expenses": False,
+    "view_revenue": False,
+    "view_profit": False,
+    "view_reports": False,
+    "manage_users": False,
+    "manage_settings": False,
+}
+ALL_PERMISSIONS = list(DEFAULT_STAFF_PERMISSIONS.keys())
+
+def has_permission(user: dict, perm: str) -> bool:
+    if user.get("role") == "admin":
+        return True
+    return bool((user.get("permissions") or {}).get(perm, False))
+
+def require_permission(perm: str):
+    def _dep(user=Depends(get_current_user)):
+        if not has_permission(user, perm):
+            raise HTTPException(status_code=403, detail=f"Permission denied: {perm}")
+        return user
+    return _dep
+
+# ---- Notifications ----
+BIG_BILL_THRESHOLD = 1000.0
+
+async def push_notification(kind: str, title: str, body: str, meta: Optional[dict] = None):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "kind": kind,  # session_started | session_ended | snack_added | big_bill
+        "title": title,
+        "body": body,
+        "meta": meta or {},
+        "read": False,
+        "created_at": iso(now_utc()),
+    }
+    await db.notifications.insert_one(doc.copy())
+    # Keep only last 200
+    total = await db.notifications.count_documents({})
+    if total > 200:
+        excess = total - 200
+        old = await db.notifications.find({}, {"_id": 1}).sort("created_at", 1).limit(excess).to_list(excess)
+        if old:
+            await db.notifications.delete_many({"_id": {"$in": [o["_id"] for o in old]}})
+
+@api.get("/notifications")
+async def list_notifications(user=Depends(get_current_user)):
+    rows = await db.notifications.find({}, {"_id": 0}).sort("created_at", -1).limit(30).to_list(30)
+    unread = await db.notifications.count_documents({"read": False})
+    return {"notifications": rows, "unread": unread}
+
+@api.post("/notifications/read-all")
+async def mark_all_read(user=Depends(get_current_user)):
+    await db.notifications.update_many({"read": False}, {"$set": {"read": True}})
+    return {"ok": True}
+
+@api.post("/notifications/{notif_id}/read")
+async def mark_read(notif_id: str, user=Depends(get_current_user)):
+    await db.notifications.update_one({"id": notif_id}, {"$set": {"read": True}})
+    return {"ok": True}
+
+# ---- Auth Routes ----
+@api.post("/auth/login")
+async def login(req: LoginReq):
+    email = req.email.lower()
+    user = await db.users.find_one({"email": email})
+    if not user or not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = create_token(user["id"], user["email"], user["role"])
+    return {
+        "access_token": token,
+        "user": {
+            "id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"],
+            "permissions": user.get("permissions") or (DEFAULT_STAFF_PERMISSIONS.copy() if user["role"] != "admin" else {p: True for p in ALL_PERMISSIONS}),
+        },
+    }
+
+@api.get("/auth/me")
+async def me(user=Depends(get_current_user)):
+    if user.get("role") == "admin":
+        user["permissions"] = {p: True for p in ALL_PERMISSIONS}
+    elif not user.get("permissions"):
+        user["permissions"] = DEFAULT_STAFF_PERMISSIONS.copy()
+    return user
+
+@api.post("/auth/logout")
+async def logout(user=Depends(get_current_user)):
+    return {"ok": True}
+
+@api.post("/auth/forgot-password")
+async def forgot(req: ForgotReq):
+    user = await db.users.find_one({"email": req.email.lower()})
+    if user:
+        token = secrets.token_urlsafe(32)
+        await db.password_resets.insert_one({
+            "token": token, "user_id": user["id"],
+            "expires_at": now_utc() + timedelta(hours=1),
+            "used": False,
+        })
+        logging.info(f"PASSWORD RESET LINK: /reset-password?token={token}")
+    return {"ok": True, "message": "If the email exists, a reset link has been generated (check server logs)."}
+
+@api.post("/auth/reset-password")
+async def reset(req: ResetReq):
+    rec = await db.password_resets.find_one({"token": req.token, "used": False})
+    if not rec or rec["expires_at"] < now_utc():
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+    await db.users.update_one({"id": rec["user_id"]}, {"$set": {"password_hash": hash_password(req.password)}})
+    await db.password_resets.update_one({"token": req.token}, {"$set": {"used": True}})
+    return {"ok": True}
+
+# ---- Users (admin) ----
+@api.get("/users")
+async def list_users(user=Depends(require_admin)):
+    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
+    return users
+
+class UserIn(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    role: str = "staff"
+    permissions: Optional[dict] = None
+
+class PermissionsUpdate(BaseModel):
+    permissions: dict
+
+class PasswordResetAdmin(BaseModel):
+    password: str
+
+@api.put("/users/{user_id}/password")
+async def admin_reset_password(user_id: str, body: PasswordResetAdmin, user=Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if len(body.password) < 4:
+        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+    await db.users.update_one({"id": user_id}, {"$set": {"password_hash": hash_password(body.password)}})
+    return {"ok": True, "message": f"Password reset for {target['email']}"}
+
+@api.post("/users")
+async def create_user(body: UserIn, user=Depends(require_admin)):
+    email = body.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="Email already exists")
+    perms = body.permissions if body.permissions is not None else DEFAULT_STAFF_PERMISSIONS.copy()
+    # normalize keys
+    perms = {k: bool(perms.get(k, False)) for k in ALL_PERMISSIONS}
+    new_user = {
+        "id": str(uuid.uuid4()),
+        "name": body.name,
+        "email": email,
+        "password_hash": hash_password(body.password),
+        "role": body.role,
+        "permissions": perms,
+        "created_at": iso(now_utc()),
+    }
+    await db.users.insert_one(new_user.copy())
+    return {k: v for k, v in new_user.items() if k != "password_hash"}
+
+@api.put("/users/{user_id}/permissions")
+async def update_permissions(user_id: str, body: PermissionsUpdate, user=Depends(require_admin)):
+    target = await db.users.find_one({"id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    perms = {k: bool(body.permissions.get(k, False)) for k in ALL_PERMISSIONS}
+    await db.users.update_one({"id": user_id}, {"$set": {"permissions": perms}})
+    target["permissions"] = perms
+    target.pop("password_hash", None)
+    return target
+
+@api.get("/permissions/available")
+async def available_permissions(user=Depends(require_admin)):
+    return {"permissions": ALL_PERMISSIONS, "defaults": DEFAULT_STAFF_PERMISSIONS}
+
+@api.delete("/users/{user_id}")
+async def delete_user(user_id: str, user=Depends(require_admin)):
+    if user_id == user["id"]:
+        raise HTTPException(status_code=400, detail="Cannot delete self")
+    res = await db.users.delete_one({"id": user_id})
+    return {"deleted": res.deleted_count}
+
+# ---- Tables ----
+@api.get("/tables")
+async def list_tables(user=Depends(get_current_user)):
+    tables = await db.tables.find({}, {"_id": 0}).sort("table_number", 1).to_list(1000)
+    return tables
+
+@api.post("/tables")
+async def create_table(body: TableIn, user=Depends(require_permission("manage_tables"))):
+    t = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": iso(now_utc())}
+    await db.tables.insert_one(t.copy())
+    return {k: v for k, v in t.items() if k != "_id"}
+
+@api.put("/tables/{table_id}")
+async def update_table(table_id: str, body: TableUpdate, user=Depends(require_permission("manage_tables"))):
+    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    res = await db.tables.update_one({"id": table_id}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Table not found")
+    t = await db.tables.find_one({"id": table_id}, {"_id": 0})
+    return t
+
+@api.delete("/tables/{table_id}")
+async def delete_table(table_id: str, user=Depends(require_permission("manage_tables"))):
+    res = await db.tables.delete_one({"id": table_id})
+    return {"deleted": res.deleted_count}
+
+# ---- Snacks ----
+@api.get("/snacks")
+async def list_snacks(user=Depends(get_current_user)):
+    snacks = await db.snacks.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+    return snacks
+
+@api.post("/snacks")
+async def create_snack(body: SnackIn, user=Depends(require_permission("manage_snacks"))):
+    s = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": iso(now_utc())}
+    await db.snacks.insert_one(s.copy())
+    return {k: v for k, v in s.items() if k != "_id"}
+
+@api.put("/snacks/{snack_id}")
+async def update_snack(snack_id: str, body: SnackUpdate, user=Depends(require_permission("manage_snacks"))):
+    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    res = await db.snacks.update_one({"id": snack_id}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Snack not found")
+    s = await db.snacks.find_one({"id": snack_id}, {"_id": 0})
+    return s
+
+@api.delete("/snacks/{snack_id}")
+async def delete_snack(snack_id: str, user=Depends(require_permission("manage_snacks"))):
+    res = await db.snacks.delete_one({"id": snack_id})
+    return {"deleted": res.deleted_count}
+
+# ---- Sessions ----
+async def _session_with_details(s):
+    table = await db.tables.find_one({"id": s["table_id"]}, {"_id": 0})
+    s["table"] = table
+    s["snacks_total"] = sum(item.get("subtotal", 0) for item in s.get("snacks", []))
+    return s
+
+@api.get("/sessions")
+async def list_sessions(status: Optional[str] = None, user=Depends(get_current_user)):
+    q = {}
+    if status:
+        q["status"] = status
+    rows = await db.sessions.find(q, {"_id": 0}).sort("start_time", -1).to_list(2000)
+    for r in rows:
+        await _session_with_details(r)
+    return rows
+
+@api.get("/sessions/active")
+async def active_sessions(user=Depends(get_current_user)):
+    rows = await db.sessions.find({"status": "active"}, {"_id": 0}).to_list(1000)
+    for r in rows:
+        await _session_with_details(r)
+    return rows
+
+@api.get("/sessions/{session_id}")
+async def get_session(session_id: str, user=Depends(get_current_user)):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await _session_with_details(s)
+    return s
+
+@api.post("/sessions/start")
+async def start_session(body: SessionStart, user=Depends(require_permission("manage_sessions"))):
+    table = await db.tables.find_one({"id": body.table_id}, {"_id": 0})
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+    if table["status"] != "available":
+        raise HTTPException(status_code=400, detail=f"Table is {table['status']}")
+    session = {
+        "id": str(uuid.uuid4()),
+        "table_id": table["id"],
+        "table_number": table["table_number"],
+        "customer_name": body.customer_name or "",
+        "notes": body.notes or "",
+        "start_time": iso(now_utc()),
+        "end_time": None,
+        "duration_minutes": 0,
+        "rate_used": float(table["hourly_rate"]),
+        "table_amount": 0.0,
+        "snacks": [],
+        "snacks_amount": 0.0,
+        "discount": 0.0,
+        "tax_percent": 0.0,
+        "tax_amount": 0.0,
+        "grand_total": 0.0,
+        "status": "active",
+        "started_by": user["id"],
+        "started_by_name": user.get("name", ""),
+        "frames": [],
+        "current_frame": None,
+        "payment_method": None,
+        "payment_notes": "",
+    }
+    await db.sessions.insert_one(session.copy())
+    await db.tables.update_one({"id": table["id"]}, {"$set": {"status": "running"}})
+    session.pop("_id", None)
+    await _session_with_details(session)
+    await push_notification(
+        "session_started",
+        f"Session started · Table {table['table_number']}",
+        f"{session['customer_name'] or 'Walk-in'} · @{int(session['rate_used'])}/hr · by {user.get('name','')}",
+        {"session_id": session["id"], "table_number": table["table_number"]},
+    )
+    return session
+
+@api.post("/sessions/{session_id}/snacks")
+async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depends(require_permission("manage_sessions"))):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+    snack = await db.snacks.find_one({"id": body.snack_id}, {"_id": 0})
+    if not snack:
+        raise HTTPException(status_code=404, detail="Snack not found")
+    if body.quantity <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be positive")
+    item = {
+        "snack_id": snack["id"],
+        "name": snack["name"],
+        "price": float(snack["price"]),
+        "quantity": body.quantity,
+        "subtotal": float(snack["price"]) * body.quantity,
+        "added_at": iso(now_utc()),
+    }
+    snacks = s.get("snacks", []) + [item]
+    snacks_amount = sum(i["subtotal"] for i in snacks)
+    await db.sessions.update_one(
+        {"id": session_id},
+        {"$set": {"snacks": snacks, "snacks_amount": snacks_amount}},
+    )
+    # decrement stock
+    new_stock = max(0, int(snack.get("stock_quantity", 0)) - body.quantity)
+    await db.snacks.update_one({"id": snack["id"]}, {"$set": {"stock_quantity": new_stock}})
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+    await push_notification(
+        "snack_added",
+        f"Snack added · Table {s['table_number']}",
+        f"{item['quantity']}× {item['name']} · ₹{item['subtotal']:.2f}",
+        {"session_id": s["id"], "table_number": s["table_number"]},
+    )
+    return s
+
+@api.delete("/sessions/{session_id}/snacks/{index}")
+async def remove_snack_from_session(session_id: str, index: int, user=Depends(require_permission("manage_sessions"))):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+    snacks = s.get("snacks", [])
+    if index < 0 or index >= len(snacks):
+        raise HTTPException(status_code=404, detail="Item not found")
+    removed = snacks.pop(index)
+    snacks_amount = sum(i["subtotal"] for i in snacks)
+    await db.sessions.update_one({"id": session_id}, {"$set": {"snacks": snacks, "snacks_amount": snacks_amount}})
+    # restock
+    await db.snacks.update_one({"id": removed["snack_id"]}, {"$inc": {"stock_quantity": removed["quantity"]}})
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+    return s
+
+@api.post("/sessions/{session_id}/finalize-preview")
+async def finalize_preview(session_id: str, user=Depends(require_permission("manage_sessions"))):
+    """Computes an EPHEMERAL billing snapshot for the End & Bill modal.
+    Does NOT persist any freeze state. Each call returns a FRESH snapshot from the current time.
+    On modal cancel, the caller discards the snapshot and the session keeps running live.
+    On confirm (/end), the caller passes the snapshot back in the request body."""
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+    end = now_utc()
+    start = datetime.fromisoformat(s["start_time"])
+    duration_seconds = (end - start).total_seconds()
+    duration_minutes = int(duration_seconds / 60)
+    duration_hours = duration_seconds / 3600.0
+    rate = float(s["rate_used"])
+    frames = s.get("frames", [])
+    if frames:
+        table_amount_raw = sum(float(f.get("amount", 0)) for f in frames)
+        if s.get("current_frame"):
+            cf = s["current_frame"]
+            cf_seconds = max(0.0, (end - datetime.fromisoformat(cf["start_time"])).total_seconds())
+            table_amount_raw += (cf_seconds / 3600.0) * rate
+    else:
+        table_amount_raw = duration_hours * rate
+    table_amount = round(table_amount_raw, 2)
+    snacks_amount = float(s.get("snacks_amount", 0))
+    grand_total_exact = round(table_amount + snacks_amount, 2)
+    grand_total = int(round(grand_total_exact))
+    await _session_with_details(s)
+    # Strip any legacy preview_* fields that may exist from before this refactor
+    for k in ("preview_end_time", "preview_duration_minutes", "preview_table_amount", "preview_grand_total", "preview_grand_total_exact"):
+        s.pop(k, None)
+    return {
+        **s,
+        "freeze_snapshot": {
+            "end_time": iso(end),
+            "duration_seconds": int(duration_seconds),
+            "duration_minutes": duration_minutes,
+            "table_amount": table_amount,
+            "snacks_amount": snacks_amount,
+            "grand_total_exact": grand_total_exact,
+            "grand_total": grand_total,
+        },
+    }
+
+@api.post("/sessions/{session_id}/end")
+async def end_session(session_id: str, body: SessionEnd, user=Depends(require_permission("manage_sessions"))):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+    # Determine authoritative end timestamp
+    start_dt = datetime.fromisoformat(s["start_time"])
+    now = now_utc()
+    if body.freeze_snapshot:
+        try:
+            snap_end = datetime.fromisoformat(body.freeze_snapshot.end_time)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid freeze_snapshot.end_time")
+        # Validate: must be between start_time and now, and monetary values non-negative
+        if snap_end < start_dt or snap_end > now + timedelta(seconds=5):
+            raise HTTPException(status_code=400, detail="freeze_snapshot.end_time out of range")
+        if body.freeze_snapshot.duration_minutes < 0 or body.freeze_snapshot.table_amount < 0:
+            raise HTTPException(status_code=400, detail="freeze_snapshot values must be non-negative")
+        end = snap_end
+        # Recompute table_amount server-side to prevent tampering. Trust only the end_time.
+        rate = float(s["rate_used"])
+    else:
+        end = now
+        rate = float(s["rate_used"])
+
+    # Close current frame (if any) at the authoritative end timestamp — BEFORE writing session
+    frames = list(s.get("frames") or [])
+    if s.get("current_frame"):
+        frame = dict(s["current_frame"])
+        frame["end_time"] = iso(end)
+        dur_sec = max(0.0, (end - datetime.fromisoformat(frame["start_time"])).total_seconds())
+        frame["duration_minutes"] = int(dur_sec / 60)
+        frame["amount"] = round((dur_sec / 3600.0) * rate, 2)
+        frame["auto_closed"] = True
+        frames.append(frame)
+
+    duration_seconds = (end - start_dt).total_seconds()
+    duration_minutes = int(duration_seconds / 60)
+    # Table amount: sum of frame amounts if any, else full duration × rate
+    if frames:
+        table_amount = round(sum(float(f.get("amount", 0)) for f in frames), 2)
+    else:
+        table_amount = round((duration_seconds / 3600.0) * rate, 2)
+    payment_method = (body.payment_method or "cash").lower()
+    if payment_method not in PAYMENT_METHODS:
+        raise HTTPException(status_code=400, detail=f"Invalid payment_method. Allowed: {', '.join(PAYMENT_METHODS)}")
+    # Use freeze_snapshot from the modal if provided; otherwise compute fresh from now.
+    snap = body.freeze_snapshot or {}
+    if snap.get("end_time"):
+        end = datetime.fromisoformat(snap["end_time"])
+        duration_minutes = int(snap.get("duration_minutes") or 0)
+        table_amount = float(snap.get("table_amount") or 0)
+    else:
+        start = datetime.fromisoformat(s["start_time"])
+        end = now_utc()
+        duration_seconds = (end - start).total_seconds()
+        duration_minutes = int(duration_seconds / 60)
+        duration_hours = duration_seconds / 3600.0
+        rate = float(s["rate_used"])
+        table_amount = round(duration_hours * rate, 2)
+    snacks_amount = float(s.get("snacks_amount", 0))
+    discount = float(body.discount or 0)
+    tax_percent = float(body.tax_percent or 0)
+    subtotal = table_amount + snacks_amount - discount
+    tax_amount = round(subtotal * tax_percent / 100, 2)
+    grand_total_exact = round(subtotal + tax_amount, 2)
+    grand_total = int(round(grand_total_exact))  # nearest whole rupee — frozen
+    invoice_no = "INV-" + datetime.now().strftime("%Y%m%d") + "-" + s["id"][:6].upper()
+
+    # Split payments: normalize and validate. Fallback to single payment_method for full amount.
+    split_payments = []
+    if body.payments:
+        for p in body.payments:
+            m = (p.get("method") or "").lower()
+            amt = float(p.get("amount") or 0)
+            if m not in PAYMENT_METHODS:
+                raise HTTPException(status_code=400, detail=f"Invalid payment method '{m}'")
+            if amt > 0:
+                split_payments.append({"method": m, "amount": round(amt, 2)})
+    if not split_payments:
+        split_payments = [{"method": payment_method, "amount": grand_total}]
+    total_paid = round(sum(p["amount"] for p in split_payments), 2)
+    if abs(total_paid - grand_total) > 0.5:
+        raise HTTPException(status_code=400, detail=f"Payments ({total_paid}) don't match total ({grand_total})")
+    primary_method = split_payments[0]["method"] if len(split_payments) == 1 else "split"
+
+    update = {
+        "end_time": iso(end),
+        "duration_minutes": duration_minutes,
+        "table_amount": table_amount,
+        "discount": discount,
+        "tax_percent": tax_percent,
+        "tax_amount": tax_amount,
+        "grand_total": grand_total,
+        "grand_total_exact": grand_total_exact,
+        "status": "completed",
+        "invoice_no": invoice_no,
+        "ended_at": iso(end),
+        "payment_method": primary_method,
+        "payments": split_payments,
+        "payment_notes": body.payment_notes or "",
+        "ended_by": user["id"],
+        "ended_by_name": user.get("name", ""),
+    }
+    await db.sessions.update_one({"id": session_id}, {"$set": update})
+    await db.tables.update_one({"id": s["table_id"]}, {"$set": {"status": "available"}})
+    # Store payment records for reports (one per method)
+    for p in split_payments:
+        await db.payments.insert_one({
+            "id": str(uuid.uuid4()),
+            "session_id": session_id,
+            "invoice_no": invoice_no,
+            "amount": p["amount"],
+            "method": p["method"],
+            "notes": body.payment_notes or "",
+            "table_number": s["table_number"],
+            "customer_name": s.get("customer_name") or "",
+            "created_at": iso(end),
+        })
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+    await push_notification(
+        "session_ended",
+        f"Bill generated · {invoice_no}",
+        f"Table {s['table_number']} · {duration_minutes} min · ₹{grand_total:.2f} · {payment_method.upper()}",
+        {"session_id": s["id"], "table_number": s["table_number"], "grand_total": grand_total, "invoice_no": invoice_no, "payment_method": payment_method},
+    )
+    if grand_total >= BIG_BILL_THRESHOLD:
+        await push_notification(
+            "big_bill",
+            f"Big bill raised · ₹{grand_total:.2f}",
+            f"Table {s['table_number']} · {s.get('customer_name') or 'Walk-in'} · Invoice {invoice_no}",
+            {"session_id": s["id"], "grand_total": grand_total},
+        )
+    return s
+
+# ---- Frames ----
+@api.post("/sessions/{session_id}/frames/start")
+async def start_frame(session_id: str, body: FrameStart, user=Depends(require_permission("manage_sessions"))):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+    if s.get("current_frame"):
+        raise HTTPException(status_code=400, detail="A frame is already running. End it first.")
+    frame_no = len(s.get("frames", [])) + 1
+    frame = {
+        "id": str(uuid.uuid4()),
+        "frame_number": frame_no,
+        "player_a": body.player_a or "",
+        "player_b": body.player_b or "",
+        "start_time": iso(now_utc()),
+        "end_time": None,
+        "winner": None,
+        "loser": None,
+        "paid_by": None,
+        "notes": "",
+        "duration_minutes": 0,
+    }
+    await db.sessions.update_one({"id": session_id}, {"$set": {"current_frame": frame}})
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+    return s
+
+@api.post("/sessions/{session_id}/frames/end")
+async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permission("manage_sessions"))):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+    frame = s.get("current_frame")
+    if not frame:
+        raise HTTPException(status_code=400, detail="No active frame. Start one first.")
+    frame["winner"] = body.winner
+    frame["loser"] = body.loser
+    frame["paid_by"] = body.paid_by
+    frame["notes"] = body.notes or ""
+    frame["end_time"] = iso(now_utc())
+    dur_sec = max(0.0, (datetime.fromisoformat(frame["end_time"]) - datetime.fromisoformat(frame["start_time"])).total_seconds())
+    frame["duration_minutes"] = int(dur_sec / 60)
+    frame["amount"] = round((dur_sec / 3600.0) * float(s.get("rate_used", 0)), 2)
+    frames = s.get("frames", []) + [frame]
+    # Auto-start next frame (same players)
+    next_frame = {
+        "id": str(uuid.uuid4()),
+        "frame_number": len(frames) + 1,
+        "player_a": frame.get("player_a", ""),
+        "player_b": frame.get("player_b", ""),
+        "start_time": iso(now_utc()),
+        "end_time": None,
+        "winner": None,
+        "loser": None,
+        "paid_by": None,
+        "notes": "",
+        "duration_minutes": 0,
+    }
+    await db.sessions.update_one({"id": session_id}, {"$set": {"frames": frames, "current_frame": next_frame}})
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+    return s
+
+@api.post("/sessions/{session_id}/frames/stop")
+async def stop_frame(session_id: str, user=Depends(require_permission("manage_sessions"))):
+    """Cancel current frame without a winner (rare)."""
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+    await db.sessions.update_one({"id": session_id}, {"$set": {"current_frame": None}})
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+    return s
+
+# ---- Dashboard ----
+@api.get("/dashboard/stats")
+async def dashboard_stats(user=Depends(get_current_user)):
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    tables = await db.tables.find({}, {"_id": 0}).to_list(1000)
+    available = sum(1 for t in tables if t["status"] == "available")
+    occupied = sum(1 for t in tables if t["status"] == "running")
+    active = await db.sessions.count_documents({"status": "active"})
+    completed_today = await db.sessions.find(
+        {"status": "completed", "ended_at": {"$gte": iso(today_start)}}, {"_id": 0}
+    ).to_list(1000)
+    today_revenue = round(sum(s.get("grand_total", 0) for s in completed_today), 2)
+    today_snacks_revenue = round(sum(s.get("snacks_amount", 0) for s in completed_today), 2)
+    today_sessions = len(completed_today) + active
+    return {
+        "today_revenue": today_revenue,
+        "active_sessions": active,
+        "available_tables": available,
+        "occupied_tables": occupied,
+        "snacks_revenue": today_snacks_revenue,
+        "today_sessions": today_sessions,
+        "total_tables": len(tables),
+    }
+
+@api.get("/dashboard/charts")
+async def dashboard_charts(user=Depends(get_current_user)):
+    # Daily revenue for last 7 days
+    now = datetime.now(timezone.utc)
+    daily = []
+    for i in range(6, -1, -1):
+        d = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        d_end = d + timedelta(days=1)
+        rows = await db.sessions.find(
+            {"status": "completed", "ended_at": {"$gte": iso(d), "$lt": iso(d_end)}}, {"_id": 0}
+        ).to_list(2000)
+        daily.append({
+            "date": d.strftime("%a"),
+            "revenue": round(sum(r.get("grand_total", 0) for r in rows), 2),
+            "sessions": len(rows),
+        })
+    # Snack sales — top 5
+    pipeline = [
+        {"$match": {"status": "completed"}},
+        {"$unwind": "$snacks"},
+        {"$group": {"_id": "$snacks.name", "qty": {"$sum": "$snacks.quantity"}, "revenue": {"$sum": "$snacks.subtotal"}}},
+        {"$sort": {"qty": -1}},
+        {"$limit": 5},
+    ]
+    snacks_agg = await db.sessions.aggregate(pipeline).to_list(10)
+    snack_sales = [{"name": x["_id"], "qty": x["qty"], "revenue": round(x["revenue"], 2)} for x in snacks_agg]
+
+    # Peak hours
+    pipeline2 = [
+        {"$match": {"status": "completed", "start_time": {"$ne": None}}},
+        {"$project": {"hour": {"$hour": {"$dateFromString": {"dateString": "$start_time"}}}}},
+        {"$group": {"_id": "$hour", "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]
+    hours_agg = await db.sessions.aggregate(pipeline2).to_list(24)
+    peak = [{"hour": f"{x['_id']:02d}:00", "sessions": x["count"]} for x in hours_agg]
+    return {"daily": daily, "snack_sales": snack_sales, "peak_hours": peak}
+
+@api.get("/dashboard/recent")
+async def dashboard_recent(user=Depends(get_current_user)):
+    sessions = await db.sessions.find({}, {"_id": 0}).sort("start_time", -1).limit(5).to_list(5)
+    bills = await db.sessions.find({"status": "completed"}, {"_id": 0}).sort("ended_at", -1).limit(5).to_list(5)
+    return {"sessions": sessions, "bills": bills}
+
+# ---- Reports ----
+@api.get("/reports")
+async def reports(period: str = Query("daily"), start: Optional[str] = None, end: Optional[str] = None, user=Depends(require_permission("view_reports"))):
+    now = datetime.now(timezone.utc)
+    if start and end:
+        d_start = datetime.fromisoformat(start)
+        d_end = datetime.fromisoformat(end)
+    elif period == "weekly":
+        d_start = now - timedelta(days=7)
+        d_end = now
+    elif period == "monthly":
+        d_start = now - timedelta(days=30)
+        d_end = now
+    else:
+        d_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        d_end = now
+    sessions = await db.sessions.find(
+        {"status": "completed", "ended_at": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+    ).to_list(5000)
+    total_sessions = len(sessions)
+    total_revenue = round(sum(s.get("grand_total", 0) for s in sessions), 2)
+    snack_revenue = round(sum(s.get("snacks_amount", 0) for s in sessions), 2)
+    table_revenue = round(sum(s.get("table_amount", 0) for s in sessions), 2)
+    avg_duration = round(sum(s.get("duration_minutes", 0) for s in sessions) / total_sessions, 1) if total_sessions else 0
+    # best tables
+    table_totals = {}
+    for s in sessions:
+        k = s.get("table_number", "?")
+        table_totals[k] = table_totals.get(k, 0) + s.get("grand_total", 0)
+    best_tables = sorted([{"table": k, "revenue": round(v, 2)} for k, v in table_totals.items()], key=lambda x: -x["revenue"])[:5]
+    # best snacks
+    snack_totals = {}
+    for s in sessions:
+        for item in s.get("snacks", []):
+            n = item["name"]
+            snack_totals[n] = snack_totals.get(n, {"qty": 0, "revenue": 0})
+            snack_totals[n]["qty"] += item["quantity"]
+            snack_totals[n]["revenue"] += item["subtotal"]
+    best_snacks = sorted(
+        [{"name": n, **v, "revenue": round(v["revenue"], 2)} for n, v in snack_totals.items()],
+        key=lambda x: -x["qty"],
+    )[:5]
+    customers = len({s.get("customer_name") for s in sessions if s.get("customer_name")})
+    return {
+        "period": period,
+        "start": iso(d_start),
+        "end": iso(d_end),
+        "total_sessions": total_sessions,
+        "total_revenue": total_revenue,
+        "snack_revenue": snack_revenue,
+        "table_revenue": table_revenue,
+        "avg_duration_min": avg_duration,
+        "best_tables": best_tables,
+        "best_snacks": best_snacks,
+        "total_customers": customers,
+        "sessions": sessions,
+    }
+
+# ---- Expense Categories helper ----
+@api.get("/expenses/categories")
+async def list_expense_categories(user=Depends(get_current_user)):
+    # Fetch custom sub-categories added by admin
+    custom = await db.expense_categories.find({}, {"_id": 0}).to_list(500)
+    merged = {k: list(v) for k, v in EXPENSE_CATEGORIES.items()}
+    for c in custom:
+        merged.setdefault(c["category"], [])
+        if c.get("subcategory") and c["subcategory"] not in merged[c["category"]]:
+            merged[c["category"]].append(c["subcategory"])
+    return {"categories": merged, "payment_methods": PAYMENT_METHODS}
+
+class CustomCategoryIn(BaseModel):
+    category: str
+    subcategory: str
+
+@api.post("/expenses/categories")
+async def add_expense_category(body: CustomCategoryIn, user=Depends(require_permission("manage_expenses"))):
+    doc = {"id": str(uuid.uuid4()), "category": body.category, "subcategory": body.subcategory, "created_at": iso(now_utc())}
+    await db.expense_categories.insert_one(doc.copy())
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+# ---- Expenses ----
+def _parse_date(d: Optional[str]) -> datetime:
+    if not d:
+        return now_utc()
+    try:
+        return datetime.fromisoformat(d.replace("Z", "+00:00"))
+    except Exception:
+        return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+@api.get("/expenses")
+async def list_expenses(
+    start: Optional[str] = None, end: Optional[str] = None,
+    category: Optional[str] = None, vendor_id: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    user=Depends(require_permission("view_expenses")),
+):
+    q = {}
+    if start or end:
+        q["date"] = {}
+        if start: q["date"]["$gte"] = iso(_parse_date(start))
+        if end: q["date"]["$lte"] = iso(_parse_date(end))
+    if category: q["category"] = category
+    if vendor_id: q["vendor_id"] = vendor_id
+    if payment_method: q["payment_method"] = payment_method
+    rows = await db.expenses.find(q, {"_id": 0}).sort("date", -1).to_list(5000)
+    return rows
+
+@api.post("/expenses")
+async def create_expense(body: ExpenseIn, user=Depends(require_permission("manage_expenses"))):
+    doc = {
+        "id": str(uuid.uuid4()),
+        "date": iso(_parse_date(body.date)),
+        "category": body.category,
+        "subcategory": body.subcategory or "",
+        "amount": float(body.amount),
+        "payment_method": (body.payment_method or "cash").lower(),
+        "vendor_id": body.vendor_id,
+        "vendor_name": body.vendor_name or "",
+        "notes": body.notes or "",
+        "bill_url": body.bill_url or "",
+        "recurring": bool(body.recurring),
+        "recurring_frequency": body.recurring_frequency,
+        "created_by": user["id"],
+        "created_at": iso(now_utc()),
+    }
+    await db.expenses.insert_one(doc.copy())
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+@api.put("/expenses/{expense_id}")
+async def update_expense(expense_id: str, body: ExpenseUpdate, user=Depends(require_permission("manage_expenses"))):
+    update = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "date" in update:
+        update["date"] = iso(_parse_date(update["date"]))
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    res = await db.expenses.update_one({"id": expense_id}, {"$set": update})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Expense not found")
+    return await db.expenses.find_one({"id": expense_id}, {"_id": 0})
+
+@api.delete("/expenses/{expense_id}")
+async def delete_expense(expense_id: str, user=Depends(require_permission("manage_expenses"))):
+    res = await db.expenses.delete_one({"id": expense_id})
+    return {"deleted": res.deleted_count}
+
+# ---- Vendors ----
+@api.get("/vendors")
+async def list_vendors(user=Depends(require_permission("view_expenses"))):
+    return await db.vendors.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+
+@api.post("/vendors")
+async def create_vendor(body: VendorIn, user=Depends(require_permission("manage_expenses"))):
+    doc = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": iso(now_utc())}
+    await db.vendors.insert_one(doc.copy())
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+@api.put("/vendors/{vendor_id}")
+async def update_vendor(vendor_id: str, body: VendorIn, user=Depends(require_permission("manage_expenses"))):
+    res = await db.vendors.update_one({"id": vendor_id}, {"$set": body.model_dump()})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    return await db.vendors.find_one({"id": vendor_id}, {"_id": 0})
+
+@api.delete("/vendors/{vendor_id}")
+async def delete_vendor(vendor_id: str, user=Depends(require_permission("manage_expenses"))):
+    res = await db.vendors.delete_one({"id": vendor_id})
+    return {"deleted": res.deleted_count}
+
+# ---- Recurring Expenses ----
+def _compute_next_run(freq: str, day_of_month: int, base: datetime) -> datetime:
+    if freq == "weekly":
+        return base + timedelta(days=7)
+    if freq == "yearly":
+        try:
+            return base.replace(year=base.year + 1)
+        except ValueError:
+            return base + timedelta(days=365)
+    # monthly (default)
+    year, month = base.year, base.month + 1
+    if month > 12:
+        month = 1; year += 1
+    try:
+        return base.replace(year=year, month=month, day=min(day_of_month, 28))
+    except ValueError:
+        return base + timedelta(days=30)
+
+@api.get("/recurring-expenses")
+async def list_recurring(user=Depends(require_permission("view_expenses"))):
+    return await db.recurring_expenses.find({}, {"_id": 0}).sort("name", 1).to_list(500)
+
+@api.post("/recurring-expenses")
+async def create_recurring(body: RecurringIn, user=Depends(require_permission("manage_expenses"))):
+    now = now_utc()
+    next_run = now.replace(day=min(body.day_of_month, 28))
+    if next_run < now:
+        next_run = _compute_next_run(body.frequency, body.day_of_month, now)
+    doc = {
+        "id": str(uuid.uuid4()),
+        **body.model_dump(),
+        "next_run": iso(next_run),
+        "last_generated": None,
+        "created_at": iso(now),
+    }
+    await db.recurring_expenses.insert_one(doc.copy())
+    return {k: v for k, v in doc.items() if k != "_id"}
+
+@api.put("/recurring-expenses/{rec_id}")
+async def update_recurring(rec_id: str, body: RecurringIn, user=Depends(require_permission("manage_expenses"))):
+    res = await db.recurring_expenses.update_one({"id": rec_id}, {"$set": body.model_dump()})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return await db.recurring_expenses.find_one({"id": rec_id}, {"_id": 0})
+
+@api.delete("/recurring-expenses/{rec_id}")
+async def delete_recurring(rec_id: str, user=Depends(require_permission("manage_expenses"))):
+    res = await db.recurring_expenses.delete_one({"id": rec_id})
+    return {"deleted": res.deleted_count}
+
+@api.post("/recurring-expenses/run-due")
+async def run_due_recurring(user=Depends(require_permission("manage_expenses"))):
+    """Generate expenses for all due recurring items."""
+    now = now_utc()
+    due = await db.recurring_expenses.find({"active": True, "next_run": {"$lte": iso(now)}}, {"_id": 0}).to_list(500)
+    generated = 0
+    for r in due:
+        exp = {
+            "id": str(uuid.uuid4()),
+            "date": iso(now),
+            "category": r["category"],
+            "subcategory": r.get("subcategory") or "",
+            "amount": float(r["amount"]),
+            "payment_method": r.get("payment_method", "cash"),
+            "vendor_id": r.get("vendor_id"),
+            "vendor_name": r.get("vendor_name", ""),
+            "notes": f"(Auto) {r.get('notes','')}",
+            "bill_url": "",
+            "recurring": True,
+            "recurring_frequency": r["frequency"],
+            "created_by": user["id"],
+            "created_at": iso(now),
+            "recurring_source": r["id"],
+        }
+        await db.expenses.insert_one(exp.copy())
+        next_run = _compute_next_run(r["frequency"], r.get("day_of_month", 1), now)
+        await db.recurring_expenses.update_one(
+            {"id": r["id"]}, {"$set": {"last_generated": iso(now), "next_run": iso(next_run)}}
+        )
+        generated += 1
+    return {"generated": generated}
+
+# ---- Financial Report endpoints ----
+def _period_range(period: str, start: Optional[str] = None, end: Optional[str] = None):
+    now = datetime.now(timezone.utc)
+    if start and end:
+        return _parse_date(start), _parse_date(end)
+    if period == "yesterday":
+        s = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return s, s + timedelta(days=1)
+    if period == "weekly":
+        return now - timedelta(days=7), now
+    if period == "monthly":
+        return now - timedelta(days=30), now
+    # today
+    return now.replace(hour=0, minute=0, second=0, microsecond=0), now
+
+@api.get("/reports/pnl")
+async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, end: Optional[str] = None, user=Depends(require_permission("view_profit"))):
+    d_start, d_end = _period_range(period, start, end)
+    # Revenue = completed sessions in range
+    sessions = await db.sessions.find(
+        {"status": "completed", "ended_at": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+    ).to_list(10000)
+    table_revenue = round(sum(s.get("table_amount", 0) for s in sessions), 2)
+    snack_revenue = round(sum(s.get("snacks_amount", 0) for s in sessions), 2)
+    gross_revenue = round(sum(s.get("grand_total", 0) for s in sessions), 2)
+    # Expenses in range
+    exps = await db.expenses.find(
+        {"date": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+    ).to_list(10000)
+    total_expenses = round(sum(e.get("amount", 0) for e in exps), 2)
+    net_profit = round(gross_revenue - total_expenses, 2)
+    margin = round((net_profit / gross_revenue * 100), 2) if gross_revenue > 0 else 0.0
+    # Expense breakdown by category
+    by_cat = {}
+    for e in exps:
+        c = e.get("category", "Miscellaneous")
+        by_cat[c] = by_cat.get(c, 0) + float(e.get("amount", 0))
+    expense_breakdown = sorted(
+        [{"category": k, "amount": round(v, 2)} for k, v in by_cat.items()],
+        key=lambda x: -x["amount"],
+    )
+    # Monthly trend (last 6 months)
+    trend = []
+    for i in range(5, -1, -1):
+        m_end = (now_utc().replace(day=1) - timedelta(days=1)) if i > 0 else now_utc()
+        # simpler: compute back N months from now
+        pass
+    # Use 6 buckets going back
+    trend = []
+    cursor = now_utc().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    for i in range(5, -1, -1):
+        # month starting `i` months ago
+        year = cursor.year
+        month = cursor.month - i
+        while month <= 0:
+            month += 12; year -= 1
+        m_start = cursor.replace(year=year, month=month)
+        next_month = m_start.replace(day=28) + timedelta(days=4)
+        m_end = next_month - timedelta(days=next_month.day)
+        m_end = m_end.replace(hour=23, minute=59, second=59)
+        rev = await db.sessions.find(
+            {"status": "completed", "ended_at": {"$gte": iso(m_start), "$lte": iso(m_end)}}, {"_id": 0}
+        ).to_list(5000)
+        exp_rows = await db.expenses.find(
+            {"date": {"$gte": iso(m_start), "$lte": iso(m_end)}}, {"_id": 0}
+        ).to_list(5000)
+        r = sum(x.get("grand_total", 0) for x in rev)
+        ex = sum(x.get("amount", 0) for x in exp_rows)
+        trend.append({
+            "month": m_start.strftime("%b"),
+            "revenue": round(r, 2),
+            "expenses": round(ex, 2),
+            "profit": round(r - ex, 2),
+        })
+    return {
+        "period": period,
+        "start": iso(d_start), "end": iso(d_end),
+        "table_revenue": table_revenue,
+        "snack_revenue": snack_revenue,
+        "other_income": 0.0,
+        "gross_revenue": gross_revenue,
+        "total_expenses": total_expenses,
+        "net_profit": net_profit,
+        "margin_percent": margin,
+        "expense_breakdown": expense_breakdown,
+        "revenue_sources": [
+            {"name": "Table", "value": table_revenue},
+            {"name": "Snacks", "value": snack_revenue},
+        ],
+        "monthly_trend": trend,
+    }
+
+@api.get("/reports/expenses")
+async def report_expenses(period: str = "monthly", start: Optional[str] = None, end: Optional[str] = None, user=Depends(require_permission("view_expenses"))):
+    d_start, d_end = _period_range(period, start, end)
+    exps = await db.expenses.find(
+        {"date": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+    ).sort("date", -1).to_list(10000)
+    total = round(sum(e.get("amount", 0) for e in exps), 2)
+    # by category
+    by_cat = {}
+    for e in exps:
+        c = e.get("category", "Misc")
+        by_cat[c] = by_cat.get(c, 0) + float(e.get("amount", 0))
+    by_category = sorted([{"category": k, "amount": round(v, 2)} for k, v in by_cat.items()], key=lambda x: -x["amount"])
+    # by vendor
+    by_v = {}
+    for e in exps:
+        v = e.get("vendor_name") or "Unassigned"
+        by_v[v] = by_v.get(v, 0) + float(e.get("amount", 0))
+    vendor_spending = sorted([{"vendor": k, "amount": round(v, 2)} for k, v in by_v.items()], key=lambda x: -x["amount"])[:10]
+    # Monthly trend (6 months)
+    trend = []
+    cursor = now_utc().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    for i in range(5, -1, -1):
+        year = cursor.year; month = cursor.month - i
+        while month <= 0: month += 12; year -= 1
+        m_start = cursor.replace(year=year, month=month)
+        next_month = m_start.replace(day=28) + timedelta(days=4)
+        m_end = (next_month - timedelta(days=next_month.day)).replace(hour=23, minute=59, second=59)
+        exs = await db.expenses.find({"date": {"$gte": iso(m_start), "$lte": iso(m_end)}}, {"_id": 0}).to_list(5000)
+        trend.append({"month": m_start.strftime("%b"), "amount": round(sum(x.get("amount", 0) for x in exs), 2)})
+    # Largest
+    largest = sorted(exps, key=lambda x: -float(x.get("amount", 0)))[:10]
+    # Recurring
+    recurring = await db.recurring_expenses.find({"active": True}, {"_id": 0}).to_list(200)
+    return {
+        "period": period, "start": iso(d_start), "end": iso(d_end),
+        "total": total,
+        "count": len(exps),
+        "by_category": by_category,
+        "vendor_spending": vendor_spending,
+        "monthly_trend": trend,
+        "largest": largest,
+        "recurring": recurring,
+        "expenses": exps,
+    }
+
+@api.get("/reports/payments")
+async def report_payments(period: str = "monthly", start: Optional[str] = None, end: Optional[str] = None, user=Depends(require_permission("view_revenue"))):
+    d_start, d_end = _period_range(period, start, end)
+    payments = await db.payments.find(
+        {"created_at": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+    ).sort("created_at", -1).to_list(10000)
+    by_method = {m: 0.0 for m in PAYMENT_METHODS}
+    for p in payments:
+        by_method[p.get("method", "cash")] = by_method.get(p.get("method", "cash"), 0) + float(p.get("amount", 0))
+    method_totals = [{"method": m, "amount": round(v, 2)} for m, v in by_method.items()]
+    # Daily (last 14 days)
+    daily = []
+    for i in range(13, -1, -1):
+        d = (now_utc() - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        d_e = d + timedelta(days=1)
+        rows = await db.payments.find({"created_at": {"$gte": iso(d), "$lt": iso(d_e)}}, {"_id": 0}).to_list(5000)
+        daily.append({"date": d.strftime("%d %b"), "amount": round(sum(x.get("amount", 0) for x in rows), 2)})
+    return {
+        "period": period, "start": iso(d_start), "end": iso(d_end),
+        "total": round(sum(by_method.values()), 2),
+        "count": len(payments),
+        "by_method": method_totals,
+        "daily": daily,
+        "payments": payments,
+    }
+
+# ---- Club info ----
+@api.get("/club")
+async def club_info():
+    return {"name": CLUB_NAME}
+
+@api.get("/")
+async def root():
+    return {"message": "Snooker Club API", "club": CLUB_NAME}
+
+app.include_router(api)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=False,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ---- Seed ----
+async def seed():
+    await db.users.create_index("email", unique=True)
+    await db.tables.create_index("table_number", unique=True)
+    await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
+
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@snooker.com")
+    admin_pw = os.environ.get("ADMIN_PASSWORD", "admin123")
+    if not await db.users.find_one({"email": admin_email}):
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "name": "Admin",
+            "email": admin_email,
+            "password_hash": hash_password(admin_pw),
+            "role": "admin",
+            "created_at": iso(now_utc()),
+        })
+        logger.info(f"Seeded admin: {admin_email}")
+    staff_email = os.environ.get("STAFF_EMAIL", "staff@snooker.com")
+    staff_pw = os.environ.get("STAFF_PASSWORD", "staff123")
+    if not await db.users.find_one({"email": staff_email}):
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "name": "Staff",
+            "email": staff_email,
+            "password_hash": hash_password(staff_pw),
+            "role": "staff",
+            "permissions": DEFAULT_STAFF_PERMISSIONS.copy(),
+            "created_at": iso(now_utc()),
+        })
+        logger.info(f"Seeded staff: {staff_email}")
+
+    # Backfill: any staff without permissions gets defaults
+    await db.users.update_many(
+        {"role": "staff", "permissions": {"$exists": False}},
+        {"$set": {"permissions": DEFAULT_STAFF_PERMISSIONS.copy()}},
+    )
+    # Backfill: add any newly-added permission keys defaulting to False on existing users
+    all_staff = await db.users.find({"role": "staff"}, {"_id": 0}).to_list(500)
+    for u in all_staff:
+        perms = u.get("permissions") or {}
+        missing = {k: False for k in ALL_PERMISSIONS if k not in perms}
+        if missing:
+            merged = {**perms, **missing}
+            await db.users.update_one({"id": u["id"]}, {"$set": {"permissions": merged}})
+
+    # Indexes
+    await db.expenses.create_index("date")
+    await db.expenses.create_index("category")
+    await db.payments.create_index("created_at")
+    await db.payments.create_index("session_id")
+    await db.vendors.create_index("name")
+
+    if await db.tables.count_documents({}) == 0:
+        defaults = [
+            {"id": str(uuid.uuid4()), "table_number": "T1", "table_name": "Champion's Cue", "hourly_rate": 300, "status": "available"},
+            {"id": str(uuid.uuid4()), "table_number": "T2", "table_name": "Velvet Green", "hourly_rate": 300, "status": "available"},
+            {"id": str(uuid.uuid4()), "table_number": "T3", "table_name": "Black Diamond", "hourly_rate": 400, "status": "available"},
+            {"id": str(uuid.uuid4()), "table_number": "T4", "table_name": "Royal Pocket", "hourly_rate": 500, "status": "available"},
+            {"id": str(uuid.uuid4()), "table_number": "T5", "table_name": "Pro Arena", "hourly_rate": 600, "status": "maintenance"},
+        ]
+        for t in defaults:
+            t["created_at"] = iso(now_utc())
+        await db.tables.insert_many(defaults)
+        logger.info("Seeded default tables")
+
+    if await db.snacks.count_documents({}) == 0:
+        snacks = [
+            {"name": "Coke", "category": "Cold Drink", "price": 40, "stock_quantity": 50},
+            {"name": "Coffee", "category": "Hot Drink", "price": 50, "stock_quantity": 100},
+            {"name": "Chips", "category": "Snack", "price": 20, "stock_quantity": 80},
+            {"name": "Burger", "category": "Food", "price": 120, "stock_quantity": 25},
+            {"name": "Sandwich", "category": "Food", "price": 90, "stock_quantity": 30},
+            {"name": "Water", "category": "Cold Drink", "price": 20, "stock_quantity": 100},
+            {"name": "Tea", "category": "Hot Drink", "price": 30, "stock_quantity": 80},
+            {"name": "French Fries", "category": "Snack", "price": 80, "stock_quantity": 40},
+        ]
+        for s in snacks:
+            s["id"] = str(uuid.uuid4())
+            s["created_at"] = iso(now_utc())
+        await db.snacks.insert_many(snacks)
+        logger.info("Seeded default snacks")
+
+@app.on_event("startup")
+async def on_startup():
+    await seed()
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    client.close()

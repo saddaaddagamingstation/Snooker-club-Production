@@ -1,0 +1,36 @@
+{
+  "summary": "Retest of freeze-timer + whole-rupee rounding. Backend: 28/28 pytest passing (100%). Frontend: openEndModal now defined and works — End & Bill opens modal, amber 'Bill frozen' banner + data-testid=end-form-frozen visible, data-testid=frozen-total renders whole rupee ('₹5' — no decimals), single-method Confirm posts /end and navigates to /bill/{id}, bill-grand-total also shows whole rupee. However, a NEW CRITICAL bug was found: SPLIT payment (>1 method) is broken — frontend sends payment_method:'split' but backend rejects it upfront at server.py:641 with 400 'Invalid payment_method. Allowed: cash, upi, card, bank, credit'. Mismatched-split validation on the frontend still works (toast 'Payments don't match. Remaining ₹-10').",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Sessions.jsx endSession() line 57", "issue": "Sends payment_method:'split' when payments.length>1, but backend server.py:641 validates body.payment_method against PAYMENT_METHODS=[cash,upi,card,bank,credit] BEFORE looking at payments[] and returns 400 'Invalid payment_method. Allowed: cash, upi, card, bank, credit'. Split-payment flow is completely blocked from the UI. Backend pytest passes because its split tests omit payment_method (defaults to 'cash') and let backend derive primary_method='split' internally.", "selector": "[data-testid=\"confirm-end-session\"]", "priority": "CRITICAL"}
+    ],
+    "integration_issues": [
+      {"flow": "Split payment (>1 method) → /sessions/{id}/end", "issue": "400 from backend because body.payment_method='split' is not in allowed methods list. Contract mismatch between what the review spec described and what backend accepts.", "affected_selectors": ["[data-testid=\"confirm-end-session\"]", "[data-testid=\"toggle-split\"]"]}
+    ],
+    "design_issues": [
+      {"screen": "Active session card (Sessions page live view)", "issues": ["Live 'Table' and 'Est. Bill' stats show decimals like ₹0.4 for seconds-old sessions. Uses inr() (2-decimal). Consider inrRounded() for consistency with post-freeze display (minor)."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "FIX split payment: Recommended — in Sessions.jsx endSession(), when payments.length>1 send payment_method: payments[0].method (or omit and let default 'cash' apply); the backend already derives primary_method='split' internally when payments[].length>1. Alternative: in server.py bypass PAYMENT_METHODS validation when body.payments is provided, or accept 'split' as a valid alias. Recommend the frontend change (safer, no schema change).",
+    "Optional design polish: replace inr() with inrRounded() on the live active-session Stat cards so whole-rupee formatting is consistent pre-freeze and post-freeze."
+  ],
+  "critical_code_review_comments": [
+    "server.py:641 validates body.payment_method eagerly — but this field becomes irrelevant when body.payments[] is present. Consider making the validation conditional on payments being empty.",
+    "Frontend endSession() should not invent contract values ('split') that backend does not accept — either the backend contract must include 'split' or the frontend must send a real method. Current mismatch is the root cause of the regression.",
+    "Sessions.jsx still keeps `elapsed()` helper — used only for live pre-freeze display; fine but the frame amount computation uses `duration_minutes / 60` at seconds granularity which can produce tiny non-integer rupees on very short frames (already tolerated by backend, minor)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "80% — single-method End flow + whole-rupee rendering + mismatch validation all pass; split-payment end blocked by contract mismatch"},
+  "test_credentials": "admin@snooker.com/admin123, staff@snooker.com/staff123",
+  "seed_data_creation": "Started 2 sessions via UI during test; both ended (one via UI Confirm, one via cleanup API POST /sessions/{id}/end). Staff perms reset to {manage_sessions:true}.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "openEndModal + endSession signature fixes verified via UI. Only outstanding bug is split payment_method='split' being rejected by backend validator at server.py:641. Once main agent fixes (either FE to send valid method, or BE to accept 'split'/skip check when payments provided), retest by toggling data-testid=toggle-split, entering cash+upi summing to frozen-total, and confirming — must land on /bill/{id} and store 2 payments records.",
+  "rca of the issue": "During iteration 3 the developer added a 'derived' payment_method field on the client — 'split' when >1 methods. But server.py:641 was written earlier to reject anything not in PAYMENT_METHODS = [cash, upi, card, bank, credit]. The backend already computes primary_method='split' server-side (line 679) when payments[] has >1 entry, so the client should not (and need not) send payment_method='split'. Fix: change Sessions.jsx line 57 to `payment_method: payments[0].method` (safe when >=1 payment) OR remove that field entirely from the payload."
+}

@@ -1,0 +1,49 @@
+{
+  "summary": "Iteration 5 tested against the public URL. Backend regression suite passed 30/30, including new precise 5-second billing tests for finalize-preview and direct end. Desktop 1920x900 and tablet 900x800 modal layout passed: modal stayed within 90vh, split rows appeared, single-method controls hid, and frozen total/confirm footer remained visible. Split-payment UI submission still fails with HTTP 400 because frontend sends payment_method='split'. Auth playbook checks also found missing application cookies, wildcard non-credentialed CORS, no brute-force lockout, and non-updating admin seed.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/auth/login", "issue": "Does not set application access/refresh httpOnly cookies; only the Cloudflare infrastructure cookie is present. Authentication remains bearer token in localStorage.", "priority": "HIGH"},
+      {"endpoint": "/api/auth/login", "issue": "No brute-force lockout: six consecutive failures for a valid-format email all returned 401, and MongoDB has no login_attempts collection/index.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "CORS middleware", "issue": "Returns Access-Control-Allow-Origin: * with allow_credentials=False instead of explicit frontend origin plus credential support."},
+      {"endpoint": "startup seed", "issue": "Existing admin password hash is never reconciled with ADMIN_PASSWORD; seed only creates a missing account."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Sessions EndForm", "issue": "Balanced split payment submission returns HTTP 400 and remains on the modal because endSession sends payment_method='split', which backend rejects before processing payments[].", "selector": "[data-testid=confirm-end-session]", "priority": "CRITICAL"}
+    ],
+    "integration_issues": [
+      {"flow": "Split payment -> end session -> Bill", "issue": "Reproduced at 900x800 with ₹120 rounded total split Cash ₹60 + UPI ₹60: UI showed Balanced, POST /end returned 400, and no Bill navigation occurred.", "affected_selectors": ["[data-testid=toggle-split]", "[data-testid=split-cash]", "[data-testid=split-upi]", "[data-testid=confirm-end-session]"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml",
+    "/app/test_reports/pytest/pytest_precise.xml"
+  ],
+  "action_items": [
+    "Fix split contract mismatch: send a valid concrete payment_method (for example payments[0].method) or condition backend validation on payments[] being absent; backend already derives stored payment_method='split'.",
+    "Implement auth playbook requirements: secure httpOnly access/refresh cookies, cookie-aware auth/logout, explicit credentialed CORS, five-attempt lockout with MongoDB index, and seed reconciliation of changed admin password.",
+    "Retest balanced split submission through Bill page after the contract fix."
+  ],
+  "critical_code_review_comments": [
+    "Sessions.jsx endSession line 57 still sends the unsupported literal 'split'; this is the direct RCA for the UI failure.",
+    "Precise session formula is correctly shared in computeBill and correctly uses seconds/3600 on both backend paths.",
+    "Frame completion and auto-close billing still truncate to whole minutes at server.py lines 634-636 and 773-775; if precise billing is expected for frame-based sessions too, short frames remain undercharged.",
+    "Login.jsx calls navigate during render (line 20), producing React 'Cannot update BrowserRouter while rendering Login' console warnings.",
+    "server.py is ~1400 lines and exceeds the 700-line review threshold; split routes/models/helpers into focused modules."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/auth_testing.md"
+  ],
+  "success_rate": {"backend": "100% (30/30 pytest)", "frontend": "80% (layout and precise display pass at both viewports; split submission fails)"},
+  "seed_data_creation": "Created TEST_ sessions and temporary snack orders through API/UI; all active test sessions were ended. Staff permissions reset to manage_sessions=true only.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Precise 5-second preview/direct-end tests pass around ₹0.42 at ₹300/hr. Modal geometry: desktop 512x810 within 90vh and tablet 512x720 within 90vh; footer remained on-screen after split expansion. Add a snack before split UI testing so rounded total is >=2 and two positive methods can be entered.",
+  "rca_of_the_issue": "Frontend endSession constructs payment_method as 'split' for multiple payments, while backend validates payment_method against cash/upi/card/bank/credit before inspecting payments. Auth deviations are implementation gaps visible in server.py: bearer-only HTTPBearer dependency, wildcard CORS with credentials disabled, no login-attempt persistence, and create-only seeding."
+}

@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 6 verified the public app after the split-payment and frame-precision fixes. Backend regression passed 33/33. UI split flow passed end-to-end: request sent payment_method=cash with two payments, POST succeeded, Bill opened and showed Cash + UPI with Paid status, and persisted session stored payment_method=split with matching payments. Single cash, mismatch rejection, permission revocation, rounding, frozen preview, modal max-height/sticky footer, explicit frame end precision, and running-frame auto-close precision passed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/auth/login", "issue": "Auth playbook regression remains: login sets no application access/refresh httpOnly cookies, and six consecutive bad passwords all return 401 without lockout."},
+      {"endpoint": "CORS middleware", "issue": "Still returns Access-Control-Allow-Origin: * without credential support instead of an explicit credentialed origin."},
+      {"endpoint": "startup seed", "issue": "Existing admin password is not reconciled with ADMIN_PASSWORD; seed only inserts when missing."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results_iter6.xml"
+  ],
+  "action_items": [
+    "No blocker remains for split payment or frame precision.",
+    "Separately address the pre-existing auth playbook gaps when auth hardening is in scope.",
+    "Move Login redirect navigation out of render to eliminate the React setState-during-render console warning."
+  ],
+  "critical_code_review_comments": [
+    "Sessions.jsx now correctly sends payments[0].method; backend derives and persists split only when multiple positive payment records exist.",
+    "Both explicit frame end and end-session auto-close now calculate amount from elapsed seconds/3600; tests observed nonzero short-frame amounts rather than zero or a one-minute charge.",
+    "Login.jsx still calls navigate('/dashboard') during render when user is set, reproducing a BrowserRouter/Login console warning.",
+    "server.py remains about 1400 lines, above the 700-line maintainability threshold; split auth, sessions, reports, and expense routes into modules."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/iteration_6.json"
+  ],
+  "success_rate": {"backend": "100% (33/33 pytest)", "frontend": "100% of requested split and single-payment E2E flows"},
+  "seed_data_creation": "Created TEST_ API/UI sessions and snack orders; all test sessions completed. Staff permissions restored to manage_sessions=true only.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration 6 blocker is cleared. Final split UI used a frozen ₹50 total, Cash ₹25 + UPI ₹25; modal height was 860.5px at 1920x1080, Bill and backend persistence matched. Backend mismatch format and both frame precision paths are covered in backend_test.py.",
+  "rca_of_the_issue": "The prior split failure was a frontend/backend contract mismatch: literal payment_method='split' was rejected before payments[] processing. Sending the first concrete method satisfies validation, after which backend derives stored payment_method='split'. Frame undercharging came from truncating elapsed seconds to whole minutes before billing; direct seconds/3600 calculation fixes both explicit end and auto-close."
+}

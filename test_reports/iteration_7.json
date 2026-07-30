@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 7 tested the ephemeral End & Bill snapshot across public backend APIs and UI. The requested core flow passes: finalize-preview returns a fresh non-persisted freeze_snapshot; reopening after cancel increases duration/table charge; /end and Bill use the submitted snapshot; split payment, whole-rupee rounding, sticky footer, precision, permission revocation, frames, and notifications regressions passed in the 33-test suite. Two backend integrity defects were additionally reproduced: /end trusts tampered snapshots, and running frames auto-close at now rather than the frozen timestamp.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/sessions/{id}/end", "issue": "freeze_snapshot is an untyped dict and client values are trusted without validation. A staff request with duration_minutes=-60 and table_amount=-100 returned 200, persisted a completed negative invoice, and created a negative cash payment.", "priority": "CRITICAL"},
+      {"endpoint": "/api/sessions/{id}/end", "issue": "When a frame is running, it is auto-closed using now_utc() before the supplied freeze_snapshot is applied. After waiting 3 seconds between preview and confirm, invoice table_amount stayed frozen but the frame end_time/amount advanced, so itemized frame charges no longer reconcile with Table Charge.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "/api/auth/login", "issue": "Auth-hardening regression remains out of current feature scope: application access/refresh httpOnly cookies are absent; six bad passwords all return 401 and a subsequent valid login returns 200 (no lockout)."},
+      {"endpoint": "CORS middleware", "issue": "Preflight returns Access-Control-Allow-Origin: * without credential support rather than an explicit credentialed origin."},
+      {"endpoint": "startup seed", "issue": "Existing admin password is not reconciled with ADMIN_PASSWORD; login_attempts collection/index is absent. Bcrypt $2b$, unique users.email, and password reset TTL checks pass."},
+      {"endpoint": "/api/sessions/{id}", "issue": "Two pre-existing active legacy sessions in MongoDB still contain preview_* fields. New finalize-preview calls do not write them and strip them from that response, but direct GET strips nothing; the requested GET guarantee only holds for newly clean documents unless a migration/unset is performed."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results_iter7.xml",
+    "/app/test_reports/pytest/pytest_iter7_edge.xml"
+  ],
+  "action_items": [
+    "Replace SessionEnd.freeze_snapshot: dict with a strict Pydantic model, reject unknown/missing/negative/non-finite values, enforce end_time between start and request time, and recompute/verify duration and monetary values server-side (or use a signed server snapshot token).",
+    "If a current frame exists, auto-close it at the accepted snapshot end_time and ensure sum(frame amounts) equals the frozen table_amount; do not mutate the session before validating the complete end request.",
+    "Unset legacy preview_* keys in stored sessions or strip them from all session GET/list responses.",
+    "Address the documented auth playbook gaps separately when auth hardening is in scope.",
+    "Move Login navigation out of render and address Dashboard Recharts negative-size console warnings."
+  ],
+  "critical_code_review_comments": [
+    "SessionEnd.freeze_snapshot uses Optional[dict], bypassing Pydantic field validation; /end accepts arbitrary billing authority from any manage_sessions client.",
+    "end_session mutates and persists the running frame before payment/snapshot validation. A later 400 can therefore partially alter an otherwise active session, and snapshot-time consistency is impossible with the current ordering.",
+    "server.py is about 1400 lines, above the 700-line maintainability threshold; split auth, sessions, reports, and expenses into focused modules.",
+    "Login.jsx still navigates during render, reproducing React's Cannot update BrowserRouter while rendering Login warning."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/frontend/src/pages/Sessions.jsx",
+    "/app/frontend/src/pages/Bill.jsx",
+    "/app/test_reports/iteration_7.json"
+  ],
+  "success_rate": {"backend": "94% (33/33 requested/regression tests passed; 0/2 added integrity edge tests passed)", "frontend": "100% of requested ephemeral reopen, backdrop/X cancel, split confirm, sticky footer, and Bill snapshot flows"},
+  "seed_data_creation": "Created TEST_Iter7 API/UI sessions and snack orders. Normal test sessions were completed. The tampered-snapshot reproduction intentionally persisted one negative completed test invoice/payment. Two unrelated legacy active sessions with preview_* data pre-existed. Staff permissions were restored to manage_sessions=true only.",
+  "should_call_test_agent_after_fix": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Core iteration-7 behavior is verified. UI first snapshot was 1s/₹0.13 plus Coke, reopened to 6s/₹0.50, backdrop close worked, and a later split confirm sent the exact freeze_snapshot; Bill matched. Retest the two failing TestIteration7SnapshotIntegrity tests after backend validation/frame-time fixes. Missing data-testid hooks were added only for Sessions modal backdrop/close/content and Bill table charge.",
+  "rca_of_the_issue": "The core stale-state bug is fixed because finalize-preview no longer writes preview_* and the modal owns each response snapshot. Remaining integrity defects share a trust/ordering cause: freeze_snapshot is accepted as an arbitrary client dict, and current_frame is closed/persisted at wall-clock now before snapshot and payment validation. Use a validated or signed snapshot and make end processing validation-first and atomic at one accepted timestamp."
+}

@@ -1,0 +1,21 @@
+{
+  "summary": "Verified all 3 bug/feature items: (1) permission revoke with SAME staff token flips 200→403 for both view_reports and manage_tables; (2) frame amounts present in response and Bill page; (3) split payments accepted, validated (mismatch/overpayment→400 with exact message), persisted as separate payments rows, and rendered on Bill page. Backend 24/24 pytest passed. Frontend UX verified via Playwright: split toggle, per-method inputs, Remaining/Balanced/Overpaid indicator, Bill page PAYMENT DETAILS + Frame breakdown rows.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py has grown to 1340 lines — should be split into routers/models modules for maintainability.",
+    "split_payments tolerance is ±0.5 which is quite loose; consider ±0.01 for stricter reconciliation.",
+    "end_session validates payment_method even when body.payments is provided (line 591) — dead check when splits are used but harmless.",
+    "@app.on_event is deprecated; migrate to lifespan handlers."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py", "/app/test_reports/iteration_2.json"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "admin@snooker.com/admin123, staff@snooker.com/staff123",
+  "seed_data_creation": "Created split-payment session via API from UI for Bill page rendering verification. Staff account had been deleted between iterations (root cause unknown, possibly manual DB action); testing agent recreated it via POST /api/users. Autouse fixture resets staff permissions to {manage_sessions:true} after suite.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "backend_test.py now covers: TestPermissionRevoke (view_reports + manage_tables grant→200 / revoke→403 with same JWT), TestFramesAndSplitPayments (frame.amount, split success, overpayment 400, legacy single-method regression). Bill page confirmed rendering PAYMENT DETAILS (CASH/UPI amounts) + STATUS PAID + per-frame amount rows. Sessions end modal has data-testid=toggle-split, split-<method>, split-remaining, confirm-end-session. NOTE: if staff@snooker.com is missing, recreate via POST /api/users with password staff123; seed only inserts on empty collection.",
+  "rca of the issue": "N/A — all three items verified working. Perm revoke works because require_permission dependency reloads user fresh on every request via get_current_user (line 192). PUT /api/users/{id}/permissions normalizes missing keys to False (line 371). Frontend AuthProvider polls /auth/me every 20s and on window focus so UI updates promptly."
+}

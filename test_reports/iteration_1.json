@@ -1,0 +1,37 @@
+{
+  "summary": "Backend pytest: 17/18 passed (94%). Frontend: Login, Dashboard, Tables, Reports verified rendering with seeded data and live KPIs.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "POST /api/users", "issue": "Returns 500 - ValueError 'ObjectId' not iterable. In create_user the dict is passed to insert_one WITHOUT .copy(), so Mongo adds _id (ObjectId) to the same dict that is returned -> FastAPI fails to JSON-encode. Other create_* endpoints correctly use .copy(). Fix: change `await db.users.insert_one(new_user)` to `await db.users.insert_one(new_user.copy())` (or pop _id before returning).", "priority": "HIGH"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Login", "issues": ["React console warning: 'Cannot update a component (BrowserRouter) while rendering a different component (Login)'. Likely a navigate() called during render instead of useEffect."]},
+      {"screen": "Dashboard charts", "issues": ["Recharts warning: container width/height = -1 on initial render; cosmetic only, charts render after layout."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix POST /api/users 500 by copying dict before insert_one (or excluding _id from response).",
+    "Move post-login navigation inside useEffect in Login.jsx to remove setState-in-render warning."
+  ],
+  "critical_code_review_comments": [
+    "create_user mutates the inserted dict and returns it -> ObjectId leak (root cause of /api/users 500). Apply same .copy() pattern used in create_table/create_snack.",
+    "server.py has no rate-limit / brute-force lockout (not requested by playbook but worth noting).",
+    "CORS uses allow_origins=['*'] with credentials disabled - fine for current bearer-token setup.",
+    "No size limit on snacks list / sessions list pagination; fine for MVP scale.",
+    "@app.on_event is deprecated in FastAPI; use lifespan handlers for future-proofing."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py", "/app/test_reports/iteration_1.json"],
+  "success_rate": {"backend": "94%", "frontend": "100%"},
+  "test_credentials": "admin@snooker.com/admin123, staff@snooker.com/staff123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Used existing seeded data; tests create/delete TEST_* prefixed resources and clean up.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "After main agent fixes POST /api/users, re-run /app/backend/tests/backend_test.py. All other endpoints (auth, tables, snacks full session lifecycle with rate-lock + bill + table-status transitions, dashboard stats/charts, reports daily/weekly/monthly, role checks, self-delete prevention) pass. Frontend flows: login -> dashboard KPIs, Tables page with running timer + status badges + Start, Reports with date range and charts all working.",
+  "rca of the issue": "POST /api/users: server.py line ~197 `await db.users.insert_one(new_user)` -- motor mutates the dict and adds `_id: ObjectId(...)`. Subsequent `new_user.pop('password_hash')` + return triggers FastAPI's default JSON encoder which cannot serialize ObjectId. Reproduce: login as admin, POST /api/users with {name,email,password,role}. Fix: pass new_user.copy() to insert_one OR new_user.pop('_id', None) before return."
+}

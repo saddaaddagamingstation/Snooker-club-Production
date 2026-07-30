@@ -1,0 +1,34 @@
+{
+  "summary": "Backend for BUG FIX 1 (finalize-preview freeze) and FEATURE 2 (whole-rupee rounding) works perfectly — 28/28 pytest passed including 4 new tests. FRONTEND IS BROKEN: clicking 'End & Bill' throws 'ReferenceError: openEndModal is not defined' (uncaught runtime error overlay). The End modal never opens, /finalize-preview is never called from UI, amber 'Bill frozen' banner and data-testid=frozen-total are unreachable. A second latent bug: endSession() still sends the payments-array in the payment_method string field — will 400 even after openEndModal is defined.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Sessions.jsx line 126", "issue": "onClick handler references undefined function `openEndModal` — ReferenceError crashes the app when user clicks End & Bill. Confirmed via ESLint (no-undef) and Playwright pageerror. `openEndModal` was supposed to be added as: async (s) => { const {data} = await api.post(`/sessions/${s.id}/finalize-preview`); setEndModal(data); } but is missing entirely from the component.", "selector": "[data-testid^=\"end-session-\"]", "priority": "CRITICAL"},
+      {"component": "Sessions.jsx endSession() line 43-55", "issue": "Signature is (sessionId, discount, taxPercent, paymentMethod, paymentNotes) but EndForm calls onSubmit(discount, tax, payments, notes) where `payments` is an array. Inside endSession the array gets stringified into `payment_method` field and no `payments` field is sent — backend will 400. Needs to accept payments[] and send { payments: [...], payment_method: payments.length===1 ? payments[0].method : 'split' }. This also breaks the previously-working split-payment UI flow from iteration 2.", "selector": "[data-testid=\"confirm-end-session\"]", "priority": "CRITICAL"}
+    ],
+    "integration_issues": [
+      {"flow": "End & Bill → finalize-preview → modal → /end", "issue": "Frontend never POSTs /api/sessions/{id}/finalize-preview because the trigger function is undefined. Even if fixed, the /end POST will fail (see endSession bug above). Nothing about the freeze-timer UX is reachable.", "affected_selectors": ["[data-testid=\"end-form-frozen\"]", "[data-testid=\"frozen-total\"]", "[data-testid=\"confirm-end-session\"]"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Sessions.jsx: define `openEndModal` — async fn that POSTs /api/sessions/{id}/finalize-preview and setEndModal(response.data). Place it near other handlers around line 42.",
+    "Sessions.jsx: fix endSession to accept a payments[] array — send { payments, payment_method: payments.length===1 ? payments[0].method : 'split', discount, tax_percent, payment_notes }. Update Modal invocation on line 140 to pass payments through.",
+    "Retest UI: clicking End & Bill must (a) call /finalize-preview, (b) open modal, (c) show amber 'Bill frozen' banner, (d) frozen-total renders whole rupees via inrRounded, (e) Confirm posts /end and navigates to /bill/{id}, (f) Bill page bill-grand-total shows ₹N whole rupees."
+  ],
+  "critical_code_review_comments": [
+    "Sessions.jsx has an unused import `elapsed` after the refactor to frozen values — remove.",
+    "server.py end_session uses tolerance ±0.5 which is fine now that grand_total is int, but consider ±0 (exact) for cleaner reconciliation.",
+    "server.py finalize-preview: re-calling it recomputes (not idempotent). Consider short-circuiting if preview_end_time already set, otherwise a double-click on End & Bill will re-snapshot to a later moment.",
+    "server.py grand_total_exact stored as float but grand_total as int — good for accounting audit."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100%", "frontend": "0%"},
+  "test_credentials": "admin@snooker.com/admin123, staff@snooker.com/staff123",
+  "seed_data_creation": "Started 2 test sessions via UI to trigger the bug; cleaned up via API POST /sessions/{id}/end.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "New backend tests in TestFinalizePreviewAndRounding cover: freeze-invariance across GET (pv1==pv2 after 4s sleep), end uses preview values, grand_total is Python int, split after preview. All backend passing. Frontend blocker: `openEndModal` undefined + endSession() drops payments[]. Once main agent fixes Sessions.jsx, retest by starting a session, clicking end-session-<n>, checking end-form-frozen banner, frozen-total testid, and Bill page bill-grand-total (must be whole rupee).",
+  "rca of the issue": "During iteration 3 refactor to freeze the bill on End click, the developer changed the button handler to call `openEndModal(s)` (which was intended to first POST /finalize-preview then set the modal) but never actually added that function to the component body. The prior direct `setEndModal(s)` was removed. ESLint no-undef flags it and browser throws ReferenceError. Additionally `endSession` was not updated to accept the payments array coming from the new EndForm, so form submission would fail with 400 even if the modal opened. Mitigation: add openEndModal and update endSession signature (see action_items). Backend is unaffected and already correct."
+}
