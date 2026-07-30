@@ -7,7 +7,7 @@ export default function Bill() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [s, setS] = useState(null);
-  const [club, setClub] = useState("Cue Lounge");
+  const [club, setClub] = useState("Supreme Snooker");
 
   useEffect(() => {
     api.get(`/sessions/${id}`).then((r) => setS(r.data));

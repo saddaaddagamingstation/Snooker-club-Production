@@ -19,7 +19,7 @@ export default function AppLayout() {
   const { user, logout, can } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const [club, setClub] = useState("Cue Lounge");
+  const [club, setClub] = useState("Supreme Snooker");
 
   useEffect(() => {
     api.get("/club").then((r) => setClub(r.data.name)).catch(() => {});
@@ -39,7 +39,7 @@ export default function AppLayout() {
             <Circle className="w-4 h-4 text-white fill-white/20" strokeWidth={2.5} />
           </div>
           <div className="min-w-0">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-gray-500 font-bold">Cue Lounge</div>
+            <div className="text-[10px] uppercase tracking-[0.18em] text-gray-500 font-bold">Supreme Snooker</div>
             <div className="text-sm font-bold text-white truncate" title={club}>{club}</div>
           </div>
         </div>

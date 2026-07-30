@@ -8,8 +8,8 @@ import api, { formatApiErrorDetail } from "@/lib/api";
 export default function Login() {
   const { login, user } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState("admin@snooker.com");
-  const [password, setPassword] = useState("admin123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(true);
   const [show, setShow] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -54,7 +54,7 @@ export default function Login() {
               <Circle className="w-6 h-6 fill-white/20" />
             </div>
             <div>
-              <div className="text-xs uppercase tracking-[0.3em] text-green-400 font-bold">Cue Lounge</div>
+              <div className="text-xs uppercase tracking-[0.3em] text-green-400 font-bold">Supreme Snooker</div>
               <div className="text-xl font-bold tracking-tight">Snooker Management Suite</div>
             </div>
           </div>
@@ -76,7 +76,7 @@ export default function Login() {
             <div className="w-10 h-10 rounded-full bg-green-700 flex items-center justify-center">
               <Circle className="w-5 h-5 fill-white/20" />
             </div>
-            <div className="text-lg font-bold">Cue Lounge</div>
+            <div className="text-lg font-bold">Supreme Snooker</div>
           </div>
           <div className="text-xs uppercase tracking-[0.25em] text-green-500 font-bold mb-3">Welcome back</div>
           <h2 className="text-3xl sm:text-4xl font-bold tracking-tight mb-2">Sign in to your club</h2>
@@ -128,9 +128,6 @@ export default function Login() {
               >
                 {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : "Sign in"}
               </button>
-              <div className="text-xs text-center text-gray-500 mt-6">
-                Demo · admin@snooker.com / admin123 &nbsp;|&nbsp; staff@snooker.com / staff123
-              </div>
             </form>
           ) : (
             <div className="space-y-4">

@@ -498,6 +498,10 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "notes": body.notes or "",
         "start_time": iso(now_utc()),
         "end_time": None,
+        # Pause information
+        "is_paused": False,
+        "pause_started_at": None,
+        "paused_seconds": 0,
         "duration_minutes": 0,
         "rate_used": float(table["hourly_rate"]),
         "table_amount": 0.0,
@@ -645,6 +649,8 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         if body.freeze_snapshot.duration_minutes < 0 or body.freeze_snapshot.table_amount < 0:
             raise HTTPException(status_code=400, detail="freeze_snapshot values must be non-negative")
         end = snap_end
+        duration_seconds = (end - start_dt).total_seconds()
+        duration_minutes = int(duration_seconds / 60)
         # Recompute table_amount server-side to prevent tampering. Trust only the end_time.
         rate = float(s["rate_used"])
     else:
@@ -673,19 +679,7 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
     if payment_method not in PAYMENT_METHODS:
         raise HTTPException(status_code=400, detail=f"Invalid payment_method. Allowed: {', '.join(PAYMENT_METHODS)}")
     # Use freeze_snapshot from the modal if provided; otherwise compute fresh from now.
-    snap = body.freeze_snapshot or {}
-    if snap.get("end_time"):
-        end = datetime.fromisoformat(snap["end_time"])
-        duration_minutes = int(snap.get("duration_minutes") or 0)
-        table_amount = float(snap.get("table_amount") or 0)
-    else:
-        start = datetime.fromisoformat(s["start_time"])
-        end = now_utc()
-        duration_seconds = (end - start).total_seconds()
-        duration_minutes = int(duration_seconds / 60)
-        duration_hours = duration_seconds / 3600.0
-        rate = float(s["rate_used"])
-        table_amount = round(duration_hours * rate, 2)
+
     snacks_amount = float(s.get("snacks_amount", 0))
     discount = float(body.discount or 0)
     tax_percent = float(body.tax_percent or 0)
@@ -814,6 +808,9 @@ async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permis
         "player_b": frame.get("player_b", ""),
         "start_time": iso(now_utc()),
         "end_time": None,
+        "is_paused": False,
+        "pause_started_at": None,
+        "paused_seconds": 0,
         "winner": None,
         "loser": None,
         "paid_by": None,
