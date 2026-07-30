@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import api, { inr, inrRounded, formatApiErrorDetail } from "@/lib/api";
-import { Clock, Plus, Square, Trash2, X, Receipt, Trophy, Flag, RotateCw } from "lucide-react";
+import { Clock, Plus, Pause, Square, Trash2, X, Receipt, Trophy, Flag, RotateCw } from "lucide-react";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
 
@@ -19,6 +19,7 @@ export default function Sessions() {
   const [, setTick] = useState(0);
   const [addSnack, setAddSnack] = useState(null); // session
   const [endModal, setEndModal] = useState(null); // session
+  const [billingSessionId, setBillingSessionId] = useState(null); //currently in billing mode
   const navigate = useNavigate();
 
   const load = async () => {
@@ -40,13 +41,47 @@ export default function Sessions() {
     catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
   };
 
+  const handlePauseResume = async (session) => {
+  try {
+    if (session.is_paused) {
+      await api.post(`/sessions/${session.id}/resume`);
+      toast.success("Session resumed");
+    } else {
+      await api.post(`/sessions/${session.id}/pause`);
+      toast.success("Session paused");
+    }
+
+    load();
+  } catch (e) {
+    toast.error(formatApiErrorDetail(e.response?.data?.detail));
+  }
+};
+
   const openEndModal = async (session) => {
+    console.log("Button clicked");
+    console.log(session);
+
     try {
-      const { data } = await api.post(`/sessions/${session.id}/finalize-preview`);
-      // data = { ...session, freeze_snapshot: {...} }. Snapshot is ephemeral — held only in modal state.
-      setEndModal({ session: data, snapshot: data.freeze_snapshot });
-    } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
-  };
+        console.log("Before API");
+
+        const { data } = await api.post(`/sessions/${session.id}/finalize-preview`);
+
+setBillingSessionId(session.id);
+
+setEndModal({
+    session: data,
+    snapshot: data.freeze_snapshot
+});
+
+    } catch (e) {
+        console.error(e);
+        console.error(e.response);
+
+        toast.error(
+            e.response?.data?.detail || e.message || "Unknown Error"
+        );
+    }
+};
 
   const endSession = async (sessionId, discount, taxPercent, paymentsList, paymentNotes, snapshot) => {
     try {
@@ -60,6 +95,7 @@ export default function Sessions() {
         freeze_snapshot: snapshot || null,
       });
       toast.success(`Session ended. Bill ${data.invoice_no}`);
+      setBillingSessionId(null);
       setEndModal(null);
       navigate(`/bill/${data.id}`);
     } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
@@ -92,7 +128,14 @@ export default function Sessions() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {sessions.map((s) => {
-          const e = computeBill(s.start_time, null, s.rate_used);
+          const e = computeBill(
+          s.start_time,
+          null,
+          s.rate_used,
+          s.is_paused,
+          s.pause_started_at,
+          s.paused_seconds
+        );
           const tableAmount = e.tableAmount;
           const snacksAmount = s.snacks_amount || 0;
           const bill = tableAmount + snacksAmount;
@@ -133,8 +176,41 @@ export default function Sessions() {
                 </div>
               </div>
               <div className="p-6 pt-2 flex gap-3">
-                <button onClick={() => setAddSnack(s)} data-testid={`add-snack-${s.table_number}`} className="flex-1 h-11 rounded-xl bg-[#1c1c1c] hover:bg-[#262626] border border-[#262626] text-white font-semibold flex items-center justify-center gap-2"><Plus className="w-4 h-4" /> Add Snack</button>
-                <button onClick={() => openEndModal(s)} data-testid={`end-session-${s.table_number}`} className="flex-1 h-11 rounded-xl bg-red-900/40 hover:bg-red-900/60 border border-red-800 text-red-100 font-semibold flex items-center justify-center gap-2"><Square className="w-4 h-4" /> End & Bill</button>
+                <button
+                  onClick={() => setAddSnack(s)}
+                  data-testid={`add-snack-${s.table_number}`}
+                  className="flex-1 h-11 rounded-xl bg-[#1c1c1c] hover:bg-[#262626] border border-[#262626] text-white font-semibold flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add Snack
+                </button>
+
+                <button
+                  onClick={() => handlePauseResume(s)}
+                  data-testid={`pause-session-${s.table_number}`}
+                  className="flex-1 h-11 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/40 text-amber-300 font-semibold flex items-center justify-center gap-2"
+                >
+                  {s.is_paused ? (
+  <>
+    <RotateCw className="w-4 h-4" />
+    Resume
+  </>
+) : (
+  <>
+    <Pause className="w-4 h-4" />
+    Pause
+  </>
+)}
+                </button>
+
+                <button
+                  onClick={() => openEndModal(s)}
+                  data-testid={`end-session-${s.table_number}`}
+                  className="flex-1 h-11 rounded-xl bg-red-900/40 hover:bg-red-900/60 border border-red-800 text-red-100 font-semibold flex items-center justify-center gap-2"
+                >
+                  <Square className="w-4 h-4" />
+                  End & Bill
+                </button>
               </div>
             </div>
           );
@@ -147,7 +223,13 @@ export default function Sessions() {
         </Modal>
       )}
       {endModal && (
-        <Modal title="End session & generate bill" onClose={() => setEndModal(null)}>
+        <Modal
+title="End session & generate bill"
+onClose={() => {
+    setBillingSessionId(null);
+    setEndModal(null);
+}}
+>
           <EndForm session={endModal.session} snapshot={endModal.snapshot} onSubmit={(d, t, payments, n) => endSession(endModal.session.id, d, t, payments, n, endModal.snapshot)} />
         </Modal>
       )}
@@ -282,24 +364,72 @@ function Modal({ title, onClose, children }) {
 
 function SnackPicker({ snacks, onPick }) {
   const [q, setQ] = useState("");
-  const list = useMemo(() => snacks.filter((s) => s.name.toLowerCase().includes(q.toLowerCase())), [snacks, q]);
+  const list = useMemo(
+    () => snacks.filter((s) => s.name.toLowerCase().includes(q.toLowerCase())),
+    [snacks, q]
+  );
   const [qty, setQty] = useState({});
+
   return (
-    <div>
-      <input data-testid="snack-search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search snacks…" className="w-full h-11 px-4 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white placeholder-gray-600 focus:outline-none focus:border-green-700" />
-      <div className="mt-4 max-h-80 overflow-y-auto space-y-2">
-        {list.map((s) => (
-          <div key={s.id} className="flex items-center justify-between p-3 rounded-xl bg-[#0f0f0f] border border-[#1c1c1c]">
-            <div>
-              <div className="font-semibold text-sm">{s.name}</div>
-              <div className="text-xs text-gray-500">{s.category} · {inr(s.price)} · stock {s.stock_quantity}</div>
+    <div className="flex flex-col h-[60vh]">
+      {/* Search */}
+      <div className="p-5 pb-4 shrink-0">
+        <input
+          data-testid="snack-search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search snacks..."
+          className="w-full h-11 px-4 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white placeholder-gray-600 focus:outline-none focus:border-green-700"
+        />
+      </div>
+
+      {/* Scrollable List */}
+      <div
+        className="flex-1 min-h-0 overflow-y-auto px-5 pb-5 pr-2"
+        style={{
+          scrollbarWidth: "thin",
+          scrollbarGutter: "stable",
+        }}
+      >
+        <div className="space-y-2">
+          {list.map((s) => (
+            <div
+              key={s.id}
+              className="flex items-center justify-between p-3 rounded-xl bg-[#0f0f0f] border border-[#1c1c1c]"
+            >
+              <div>
+                <div className="font-semibold text-sm">{s.name}</div>
+                <div className="text-xs text-gray-500">
+                  {s.category} · {inr(s.price)} · stock {s.stock_quantity}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min="1"
+                  defaultValue="1"
+                  onChange={(e) =>
+                    setQty({
+                      ...qty,
+                      [s.id]: parseInt(e.target.value) || 1,
+                    })
+                  }
+                  className="w-16 h-10 px-2 rounded-lg bg-[#0a0a0a] border border-[#262626] text-center"
+                  data-testid={`qty-${s.name}`}
+                />
+
+                <button
+                  onClick={() => onPick(s, qty[s.id] || 1)}
+                  data-testid={`add-${s.name}`}
+                  className="h-10 px-4 rounded-lg bg-green-700 hover:bg-green-800 text-white text-sm font-semibold"
+                >
+                  Add
+                </button>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <input type="number" min="1" defaultValue="1" onChange={(e) => setQty({ ...qty, [s.id]: parseInt(e.target.value) || 1 })} className="w-16 h-10 px-2 rounded-lg bg-[#0a0a0a] border border-[#262626] text-center" data-testid={`qty-${s.name}`} />
-              <button onClick={() => onPick(s, qty[s.id] || 1)} data-testid={`add-${s.name}`} className="h-10 px-4 rounded-lg bg-green-700 hover:bg-green-800 text-white text-sm font-semibold">Add</button>
-            </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -307,17 +437,52 @@ function SnackPicker({ snacks, onPick }) {
 
 // Shared calculation used by both the live session card and the end/bill modal.
 // Returns { seconds, minutes, hoursPrecise, display, tableAmount }.
-function computeBill(startIso, freezeIso, rate) {
+function computeBill(
+  startIso,
+  freezeIso,
+  rate,
+  isPaused = false,
+  pauseStartedAt = null,
+  pausedSeconds = 0
+) {
   const startMs = new Date(startIso).getTime();
-  const endMs = freezeIso ? new Date(freezeIso).getTime() : Date.now();
-  const seconds = Math.max(0, Math.floor((endMs - startMs) / 1000));
+
+  let endMs = freezeIso
+    ? new Date(freezeIso).getTime()
+    : Date.now();
+
+  let totalPaused = pausedSeconds;
+
+  // If currently paused, include the time since pause started
+  if (isPaused && pauseStartedAt) {
+    totalPaused +=
+      (Date.now() - new Date(pauseStartedAt).getTime()) / 1000;
+  }
+
+  const seconds = Math.max(
+    0,
+    Math.floor((endMs - startMs) / 1000 - totalPaused)
+  );
+
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = seconds % 60;
-  const display = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+
+  const display = `${String(h).padStart(2, "0")}:${String(m).padStart(
+    2,
+    "0"
+  )}:${String(s).padStart(2, "0")}`;
+
   const hoursPrecise = seconds / 3600;
   const tableAmount = Math.round(hoursPrecise * rate * 100) / 100;
-  return { seconds, minutes: Math.floor(seconds / 60), hoursPrecise, display, tableAmount };
+
+  return {
+    seconds,
+    minutes: Math.floor(seconds / 60),
+    hoursPrecise,
+    display,
+    tableAmount,
+  };
 }
 
 function EndForm({ session, snapshot, onSubmit }) {
@@ -366,10 +531,7 @@ function EndForm({ session, snapshot, onSubmit }) {
   return (
     <div className="flex flex-col min-h-0 flex-1" data-testid="end-form-frozen">
       {/* Scrollable body */}
-      <div className="p-5 space-y-4 overflow-y-auto flex-1">
-        <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 font-medium flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" /> Bill frozen · timer stopped at {frozenDisplay}. Cancel to resume live timer.
-        </div>
+      <div className="px-5 py-5 pr-7 space-y-4 overflow-y-auto flex-1">
         {session.frames?.length > 0 && (
           <div className="p-3 rounded-xl bg-[#0f0f0f] border border-[#262626]">
             <div className="text-[10px] uppercase tracking-wider text-gray-500 font-bold mb-2">Frame Breakdown</div>

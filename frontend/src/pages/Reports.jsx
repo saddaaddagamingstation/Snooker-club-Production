@@ -225,7 +225,26 @@ function PaymentsTab({ params }) {
     <div className="space-y-4">
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <KpiCard label="Total" value={inr(d.total)} />
-        {d.by_method.map((m) => <KpiCard key={m.method} label={m.method.toUpperCase()} value={inr(m.amount)} accent={m.method === "cash" ? "green" : m.method === "upi" ? "blue" : m.method === "card" ? "amber" : m.method === "credit" ? "red" : "fuchsia"} />)}
+        {d.by_method
+  .filter((m) => Number(m.amount) > 0)
+  .map((m) => (
+    <KpiCard
+      key={m.method}
+      label={m.method.toUpperCase()}
+      value={inr(m.amount)}
+      accent={
+        m.method === "cash"
+          ? "green"
+          : m.method === "upi"
+          ? "blue"
+          : m.method === "card"
+          ? "amber"
+          : m.method === "credit"
+          ? "red"
+          : "fuchsia"
+      }
+    />
+))}
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Panel title="Payment Method Split"><div className="h-64"><ResponsiveContainer><PieChart><Pie data={d.by_method} dataKey="amount" nameKey="method" outerRadius={80} innerRadius={45}>{d.by_method.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}</Pie><Tooltip contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", borderRadius: 12 }} /><Legend wrapperStyle={{ fontSize: 11, color: "#a3a3a3" }} /></PieChart></ResponsiveContainer></div></Panel>

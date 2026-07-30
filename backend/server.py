@@ -502,6 +502,7 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "is_paused": False,
         "pause_started_at": None,
         "paused_seconds": 0,
+        "pause_reason": None,
         "duration_minutes": 0,
         "rate_used": float(table["hourly_rate"]),
         "table_amount": 0.0,
@@ -585,6 +586,76 @@ async def remove_snack_from_session(session_id: str, index: int, user=Depends(re
     await _session_with_details(s)
     return s
 
+@api.post("/sessions/{session_id}/pause")
+async def pause_session(
+    session_id: str,
+    user=Depends(require_permission("manage_sessions")),
+):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    if s.get("is_paused"):
+        raise HTTPException(status_code=400, detail="Session is already paused")
+
+    await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$set": {
+                "is_paused": True,
+                "pause_started_at": now_utc().isoformat(),
+                "pause_reason": "MANUAL",
+            }
+        },
+    )
+
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+
+    return s
+
+@api.post("/sessions/{session_id}/resume")
+async def resume_session(
+    session_id: str,
+    user=Depends(require_permission("manage_sessions")),
+):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+
+    if not s:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    if not s.get("is_paused"):
+        raise HTTPException(status_code=400, detail="Session is not paused")
+
+    pause_started_at = datetime.fromisoformat(s["pause_started_at"])
+    paused_seconds = s.get("paused_seconds", 0)
+
+    paused_seconds += (now_utc() - pause_started_at).total_seconds()
+
+    await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$set": {
+                "is_paused": False,
+                "pause_started_at": None,
+                "paused_seconds": paused_seconds,
+                "pause_reason": None,
+            }
+        },
+    )
+
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+
+    return s
+
 @api.post("/sessions/{session_id}/finalize-preview")
 async def finalize_preview(session_id: str, user=Depends(require_permission("manage_sessions"))):
     """Computes an EPHEMERAL billing snapshot for the End & Bill modal.
@@ -594,9 +665,18 @@ async def finalize_preview(session_id: str, user=Depends(require_permission("man
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
-    end = now_utc()
+    end = now_utc() 
     start = datetime.fromisoformat(s["start_time"])
-    duration_seconds = (end - start).total_seconds()
+    paused_seconds = float(s.get("paused_seconds", 0))
+
+    if s.get("is_paused") and s.get("pause_started_at"):
+        pause_started = datetime.fromisoformat(s["pause_started_at"])
+        paused_seconds += (end - pause_started).total_seconds()
+
+    duration_seconds = max(
+        0,
+        (end - start).total_seconds() - paused_seconds,
+    )
     duration_minutes = int(duration_seconds / 60)
     duration_hours = duration_seconds / 3600.0
     rate = float(s["rate_used"])
