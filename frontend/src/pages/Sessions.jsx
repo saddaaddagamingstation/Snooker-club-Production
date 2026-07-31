@@ -58,31 +58,38 @@ export default function Sessions() {
 };
 
   const openEndModal = async (session) => {
-    console.log("Button clicked");
-    console.log(session);
-
     try {
-        console.log("Before API");
 
-        const { data } = await api.post(`/sessions/${session.id}/finalize-preview`);
+        // Pause session for billing
+        await api.post(
+            `/sessions/${session.id}/pause?reason=BILLING`
+        );
 
-setBillingSessionId(session.id);
+        // Refresh active sessions so timer freezes immediately
+        await load();
 
-setEndModal({
-    session: data,
-    snapshot: data.freeze_snapshot
-});
+        // Get billing preview
+        const { data } = await api.post(
+            `/sessions/${session.id}/finalize-preview`
+        );
+
+        setBillingSessionId(session.id);
+
+        setEndModal({
+            session: data,
+            snapshot: data.freeze_snapshot,
+        });
 
     } catch (e) {
         console.error(e);
-        console.error(e.response);
 
         toast.error(
-            e.response?.data?.detail || e.message || "Unknown Error"
+            e.response?.data?.detail ||
+            e.message ||
+            "Unknown Error"
         );
     }
 };
-
   const endSession = async (sessionId, discount, taxPercent, paymentsList, paymentNotes, snapshot) => {
     try {
       const payments = paymentsList || [{ method: "cash", amount: 0 }];
@@ -225,9 +232,18 @@ setEndModal({
       {endModal && (
         <Modal
 title="End session & generate bill"
-onClose={() => {
+onClose={async () => {
+    try {
+        await api.post(
+            `/sessions/${billingSessionId}/resume`
+        );
+    } catch (e) {
+        console.error(e);
+    }
+
     setBillingSessionId(null);
     setEndModal(null);
+    load();
 }}
 >
           <EndForm session={endModal.session} snapshot={endModal.snapshot} onSubmit={(d, t, payments, n) => endSession(endModal.session.id, d, t, payments, n, endModal.snapshot)} />

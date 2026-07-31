@@ -589,6 +589,7 @@ async def remove_snack_from_session(session_id: str, index: int, user=Depends(re
 @api.post("/sessions/{session_id}/pause")
 async def pause_session(
     session_id: str,
+    reason: str = "MANUAL",
     user=Depends(require_permission("manage_sessions")),
 ):
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
@@ -601,6 +602,9 @@ async def pause_session(
 
     if s.get("is_paused"):
         raise HTTPException(status_code=400, detail="Session is already paused")
+    
+    if reason not in ["MANUAL", "BILLING"]:
+        raise HTTPException(status_code=400, detail="Invalid pause reason")
 
     await db.sessions.update_one(
         {"id": session_id},
@@ -608,7 +612,7 @@ async def pause_session(
             "$set": {
                 "is_paused": True,
                 "pause_started_at": now_utc().isoformat(),
-                "pause_reason": "MANUAL",
+                "pause_reason": reason,
             }
         },
     )
@@ -729,27 +733,49 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         if body.freeze_snapshot.duration_minutes < 0 or body.freeze_snapshot.table_amount < 0:
             raise HTTPException(status_code=400, detail="freeze_snapshot values must be non-negative")
         end = snap_end
-        duration_seconds = (end - start_dt).total_seconds()
-        duration_minutes = int(duration_seconds / 60)
-        # Recompute table_amount server-side to prevent tampering. Trust only the end_time.
         rate = float(s["rate_used"])
+
+        paused_seconds = float(s.get("paused_seconds", 0))
+
+        if s.get("is_paused") and s.get("pause_started_at"):
+            pause_started = datetime.fromisoformat(s["pause_started_at"])
+            paused_seconds += (end - pause_started).total_seconds()
+
+        duration_seconds = max(
+            0,
+            (end - start_dt).total_seconds() - paused_seconds
+        )
+
+        duration_minutes = int(duration_seconds / 60)
     else:
         end = now
         rate = float(s["rate_used"])
+
+        paused_seconds = float(s.get("paused_seconds", 0))
+
+        if s.get("is_paused") and s.get("pause_started_at"):
+            pause_started = datetime.fromisoformat(s["pause_started_at"])
+            paused_seconds += (end - pause_started).total_seconds()
+
+        duration_seconds = max(
+            0,
+            (end - start_dt).total_seconds() - paused_seconds
+        )
+
+    duration_minutes = int(duration_seconds / 60)
 
     # Close current frame (if any) at the authoritative end timestamp — BEFORE writing session
     frames = list(s.get("frames") or [])
     if s.get("current_frame"):
         frame = dict(s["current_frame"])
         frame["end_time"] = iso(end)
-        dur_sec = max(0.0, (end - datetime.fromisoformat(frame["start_time"])).total_seconds())
+        frame_start = datetime.fromisoformat(frame["start_time"])
+        dur_sec = max( 0,(end - frame_start).total_seconds() - paused_seconds)
         frame["duration_minutes"] = int(dur_sec / 60)
         frame["amount"] = round((dur_sec / 3600.0) * rate, 2)
         frame["auto_closed"] = True
         frames.append(frame)
 
-    duration_seconds = (end - start_dt).total_seconds()
-    duration_minutes = int(duration_seconds / 60)
     # Table amount: sum of frame amounts if any, else full duration × rate
     if frames:
         table_amount = round(sum(float(f.get("amount", 0)) for f in frames), 2)
