@@ -27,7 +27,7 @@
   ],
   "updated_files": [],
   "success_rate": {"backend": "100%", "frontend": "80% — single-method End flow + whole-rupee rendering + mismatch validation all pass; split-payment end blocked by contract mismatch"},
-  "test_credentials": "aryansingh252019@gmail.com/admin123, staff@snooker.com/staff123",
+  "test_credentials": "supremepoolandsnooker@gmail.com/SupremeSnookerClub2ndfloor, staff@snooker.com/staff123",
   "seed_data_creation": "Started 2 sessions via UI during test; both ended (one via UI Confirm, one via cleanup API POST /sessions/{id}/end). Staff perms reset to {manage_sessions:true}.",
   "retest_needed": true,
   "main_agent_can_self_test": true,

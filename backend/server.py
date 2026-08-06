@@ -1654,8 +1654,8 @@ async def seed():
     await db.tables.create_index("table_number", unique=True)
     await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
 
-    admin_email = os.environ.get("ADMIN_EMAIL", "aryansingh252019@gmail.com")
-    admin_pw = os.environ.get("ADMIN_PASSWORD", "admin123")
+    admin_email = os.environ.get("ADMIN_EMAIL", "supremepoolandsnooker@gmail.com")
+    admin_pw = os.environ.get("ADMIN_PASSWORD", "SupremeSnookerClub2ndfloor")
     if not await db.users.find_one({"email": admin_email}):
         await db.users.insert_one({
             "id": str(uuid.uuid4()),
