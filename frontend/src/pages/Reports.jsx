@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { Calendar, Download, FileText, TrendingUp, TrendingDown, Wallet, IndianRupee, PieChart as PieIcon } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, PieChart, Pie, Cell, Legend, LineChart, Line } from "recharts";
 import { toast } from "sonner";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
 
 const PERIODS = [
   { key: "today", label: "Today" },
@@ -21,7 +22,6 @@ export default function Reports() {
     { key: "expenses", label: "Expenses", perm: "view_expenses" },
     { key: "pnl", label: "Profit & Loss", perm: "view_profit" },
     { key: "payments", label: "Payments", perm: "view_revenue" },
-    { key: "sessions", label: "Sessions", perm: "view_reports" },
     { key: "snacks", label: "Snacks", perm: "view_reports" },
   ].filter((t) => can(t.perm));
 
@@ -74,7 +74,6 @@ export default function Reports() {
       {tab === "expenses" && <ExpensesTab params={params()} />}
       {tab === "pnl" && <PnlTab params={params()} />}
       {tab === "payments" && <PaymentsTab params={params()} />}
-      {tab === "sessions" && <SessionsTab params={params()} />}
       {tab === "snacks" && <SnacksTab params={params()} />}
     </div>
   );
@@ -132,8 +131,46 @@ function OverviewTab({ params }) {
 /* Revenue */
 function RevenueTab({ params }) {
   const d = useReport("/reports", params);
+
+  const [sortOrder, setSortOrder] = useState("newest");
+  const sortedSessions = [...(d?.sessions || [])].sort((a, b) => {
+  if (sortOrder === "newest") {
+    return new Date(b.ended_at) - new Date(a.ended_at);
+  }
+
+  return new Date(a.ended_at) - new Date(b.ended_at);
+});
   if (!d) return <div className="text-gray-400">Loading…</div>;
-  const rows = [["Invoice", "Date", "Table", "Customer", "Duration", "Table Amt", "Snacks", "Total"], ...d.sessions.map((s) => [s.invoice_no, s.ended_at, s.table_number, s.customer_name, s.duration_minutes, s.table_amount, s.snacks_amount, s.grand_total])];
+  const rows = [
+  [
+    "Invoice",
+    "Date",
+    "Start",
+    "End",
+    "Duration",
+    "Table",
+    "Game Revenue",
+    "Snack Revenue",
+    "Total",
+  ],
+  ...sortedSessions.map((s) => [
+    s.invoice_no,
+    new Date(s.ended_at).toLocaleDateString(),
+    new Date(s.start_time).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+    new Date(s.end_time).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+    `${Math.floor(s.duration_minutes / 60)}h ${s.duration_minutes % 60}m`,
+    s.table_number,
+    s.table_amount,
+    s.snacks_amount,
+    s.grand_total,
+  ]),
+];
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -142,12 +179,103 @@ function RevenueTab({ params }) {
         <KpiCard label="Snack Revenue" value={inr(d.snack_revenue)} accent="amber" />
         <KpiCard label="Total Customers" value={d.total_customers} accent="fuchsia" />
       </div>
-      <div className="flex gap-2">
-        <button onClick={() => exportCSV(rows, `revenue-${Date.now()}.csv`)} data-testid="export-rev-csv" className="h-11 px-5 rounded-xl bg-[#1c1c1c] hover:bg-[#262626] border border-[#262626] text-white font-semibold flex items-center gap-2"><Download className="w-4 h-4" /> Excel</button>
-        <button onClick={() => window.print()} data-testid="export-rev-pdf" className="h-11 px-5 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-2"><FileText className="w-4 h-4" /> PDF</button>
-      </div>
+      <div className="flex items-center justify-between">
+
+  <div className="flex gap-2">
+    <button
+      onClick={() => exportCSV(rows, `revenue-${Date.now()}.csv`)}
+      data-testid="export-rev-csv"
+      className="h-11 px-5 rounded-xl bg-[#1c1c1c] hover:bg-[#262626] border border-[#262626] text-white font-semibold flex items-center gap-2"
+    >
+      <Download className="w-4 h-4" />
+      Excel
+    </button>
+
+    <button
+      onClick={() => window.print()}
+      data-testid="export-rev-pdf"
+      className="h-11 px-5 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-2"
+    >
+      <FileText className="w-4 h-4" />
+      PDF
+    </button>
+  </div>
+
+  <div className="w-52">
+    <Select value={sortOrder} onValueChange={setSortOrder}>
+      <SelectTrigger className="bg-[#141414] border-[#262626]">
+        <SelectValue placeholder="Sort" />
+      </SelectTrigger>
+
+      <SelectContent>
+        <SelectItem value="newest">
+          Newest First
+        </SelectItem>
+
+        <SelectItem value="oldest">
+          Oldest First
+        </SelectItem>
+      </SelectContent>
+    </Select>
+  </div>
+
+</div>
       <Panel title="Bills">
-        <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-xs uppercase tracking-wider text-gray-500 font-bold border-b border-[#262626]"><th className="py-3 px-2">Invoice</th><th className="py-3 px-2">Date</th><th className="py-3 px-2">Table</th><th className="py-3 px-2 text-right">Total</th></tr></thead><tbody>{d.sessions.map((s) => <tr key={s.id} className="border-b border-[#1c1c1c]"><td className="py-2.5 px-2 font-mono text-xs">{s.invoice_no}</td><td className="py-2.5 px-2 text-gray-400">{new Date(s.ended_at).toLocaleString()}</td><td className="py-2.5 px-2">{s.table_number}</td><td className="py-2.5 px-2 text-right font-bold text-green-400 font-mono">{inr(s.grand_total)}</td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full text-sm"><thead>
+<tr className="text-left text-xs uppercase tracking-wider text-gray-500 font-bold border-b border-[#262626]">
+  <th className="py-3 px-2">Invoice</th>
+  <th className="py-3 px-2">Date</th>
+  <th className="py-3 px-2">Start</th>
+  <th className="py-3 px-2">End</th>
+  <th className="py-3 px-2">Duration</th>
+  <th className="py-3 px-2">Table</th>
+  <th className="py-3 px-2 text-right">Game Revenue</th>
+  <th className="py-3 px-2 text-right">Snack Revenue</th>
+  <th className="py-3 px-2 text-right">Total</th>
+</tr>
+</thead><tbody>{sortedSessions.map((s) => <tr key={s.id} className="border-b border-[#1c1c1c]">
+  <td className="py-2.5 px-2 font-mono text-xs">
+    {s.invoice_no}
+  </td>
+
+  <td className="py-2.5 px-2">
+    {new Date(s.ended_at).toLocaleDateString()}
+  </td>
+
+  <td className="py-2.5 px-2 font-mono">
+    {new Date(s.start_time).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    })}
+  </td>
+
+  <td className="py-2.5 px-2 font-mono">
+    {new Date(s.end_time).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    })}
+  </td>
+
+  <td className="py-2.5 px-2 font-mono">
+    {Math.floor(s.duration_minutes / 60)}h {s.duration_minutes % 60}m
+  </td>
+
+  <td className="py-2.5 px-2">
+    {s.table_number}
+  </td>
+
+  <td className="py-2.5 px-2 text-right font-mono text-blue-400">
+    {inr(s.table_amount)}
+  </td>
+
+  <td className="py-2.5 px-2 text-right font-mono text-amber-400">
+    {inr(s.snacks_amount)}
+  </td>
+
+  <td className="py-2.5 px-2 text-right font-bold text-green-400 font-mono">
+    {inr(s.grand_total)}
+  </td>
+</tr>)}</tbody></table></div>
       </Panel>
     </div>
   );
@@ -210,9 +338,6 @@ function PnlTab({ params }) {
         <Panel title="Expense Breakdown"><div className="h-64"><ResponsiveContainer><PieChart><Pie data={d.expense_breakdown} dataKey="amount" nameKey="category" outerRadius={80} innerRadius={45}>{d.expense_breakdown.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}</Pie><Tooltip contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", borderRadius: 12 }} /><Legend wrapperStyle={{ fontSize: 11, color: "#a3a3a3" }} /></PieChart></ResponsiveContainer></div></Panel>
         <Panel title="Revenue Sources"><div className="h-64"><ResponsiveContainer><PieChart><Pie data={d.revenue_sources} dataKey="value" nameKey="name" outerRadius={80} innerRadius={45}>{d.revenue_sources.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}</Pie><Tooltip contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", borderRadius: 12 }} /><Legend wrapperStyle={{ fontSize: 11, color: "#a3a3a3" }} /></PieChart></ResponsiveContainer></div></Panel>
       </div>
-      <div className="flex gap-2">
-        <button onClick={() => window.print()} data-testid="export-pnl-pdf" className="h-11 px-5 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-2"><FileText className="w-4 h-4" /> Export PDF</button>
-      </div>
     </div>
   );
 }
@@ -257,16 +382,8 @@ function PaymentsTab({ params }) {
   );
 }
 
-/* Sessions & Snacks */
-function SessionsTab({ params }) {
-  const d = useReport("/reports", params);
-  if (!d) return <div className="text-gray-400">Loading…</div>;
-  return (
-    <Panel title={`Sessions (${d.total_sessions})`}>
-      <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-xs uppercase tracking-wider text-gray-500 font-bold border-b border-[#262626]"><th className="py-3 px-2">Invoice</th><th className="py-3 px-2">Date</th><th className="py-3 px-2">Table</th><th className="py-3 px-2">Customer</th><th className="py-3 px-2 text-right">Duration</th></tr></thead><tbody>{d.sessions.map((s) => <tr key={s.id} className="border-b border-[#1c1c1c]"><td className="py-2.5 px-2 font-mono text-xs">{s.invoice_no}</td><td className="py-2.5 px-2 text-gray-400">{new Date(s.ended_at).toLocaleString()}</td><td className="py-2.5 px-2">{s.table_number}</td><td className="py-2.5 px-2 text-gray-400">{s.customer_name || "Walk-in"}</td><td className="py-2.5 px-2 text-right font-mono">{s.duration_minutes}m</td></tr>)}</tbody></table></div>
-    </Panel>
-  );
-}
+/* Snacks */
+
 function SnacksTab({ params }) {
   const d = useReport("/reports", params);
   if (!d) return <div className="text-gray-400">Loading…</div>;

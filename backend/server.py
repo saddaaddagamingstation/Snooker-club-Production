@@ -93,6 +93,9 @@ class SnackUpdate(BaseModel):
     stock_quantity: Optional[int] = None
     image_url: Optional[str] = None
 
+class CategoryIn(BaseModel):
+    name: str
+
 class SessionStart(BaseModel):
     table_id: str
     customer_name: Optional[str] = ""
@@ -119,11 +122,14 @@ class SessionEnd(BaseModel):
     payments: Optional[List[dict]] = None
     freeze_snapshot: Optional[FreezeSnapshot] = None
 
+
 class FrameEnd(BaseModel):
+    player_a: str
+    player_b: str   
     winner: str
-    loser: str
     paid_by: str
     notes: Optional[str] = ""
+
 
 class FrameStart(BaseModel):
     player_a: Optional[str] = ""
@@ -202,6 +208,13 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+        print("=" * 50)
+        print("JWT SUB:", payload["sub"])
+        print("USER ID:", user["id"])
+        print("EMAIL:", user["email"])
+        print("ROLE:", user["role"])
+        print("PERMISSIONS:", user.get("permissions"))
+        print("=" * 50)
     return user
 
 def require_admin(user=Depends(get_current_user)):
@@ -379,6 +392,10 @@ async def update_permissions(user_id: str, body: PermissionsUpdate, user=Depends
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
     perms = {k: bool(body.permissions.get(k, False)) for k in ALL_PERMISSIONS}
+    print("=" * 50)
+    print("UPDATING USER:", user_id)
+    print("NEW PERMISSIONS:", perms)
+    print("=" * 50)
     await db.users.update_one({"id": user_id}, {"$set": {"permissions": perms}})
     target["permissions"] = perms
     target.pop("password_hash", None)
@@ -422,6 +439,37 @@ async def update_table(table_id: str, body: TableUpdate, user=Depends(require_pe
 async def delete_table(table_id: str, user=Depends(require_permission("manage_tables"))):
     res = await db.tables.delete_one({"id": table_id})
     return {"deleted": res.deleted_count}
+
+# ---- Categories ----
+
+@api.get("/categories")
+async def list_categories(user=Depends(get_current_user)):
+    categories = await db.categories.find({}, {"_id": 0}).sort("name", 1).to_list(100)
+    return categories
+
+@api.post("/categories")
+async def create_category(body: CategoryIn, user=Depends(require_permission("manage_snacks"))):
+    name = body.name.strip()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="Category name is required")
+
+    existing = await db.categories.find_one({
+        "name": {"$regex": f"^{name}$", "$options": "i"}
+    })
+
+    if existing:
+        raise HTTPException(status_code=400, detail="Category already exists")
+
+    category = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "created_at": iso(now_utc())
+    }
+
+    await db.categories.insert_one(category.copy())
+
+    return category
 
 # ---- Snacks ----
 @api.get("/snacks")
@@ -516,7 +564,20 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "started_by": user["id"],
         "started_by_name": user.get("name", ""),
         "frames": [],
-        "current_frame": None,
+        "current_frame": {
+            "id": str(uuid.uuid4()),
+            "frame_number": 1,
+            "player_a": "",
+            "player_b": "",
+            "start_time": iso(now_utc()),
+            "end_time": None,
+            "winner": None,
+            "loser": None,
+            "paid_by": None,
+            "notes": "",
+            "duration_minutes": 0,
+            "paused_seconds": 0,
+        },
         "payment_method": None,
         "payment_notes": "",
     }
@@ -540,8 +601,22 @@ async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depen
     snack = await db.snacks.find_one({"id": body.snack_id}, {"_id": 0})
     if not snack:
         raise HTTPException(status_code=404, detail="Snack not found")
+    
     if body.quantity <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be positive")
+    stock = int(snack.get("stock_quantity", 0))
+
+    if stock <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="This item is out of stock"
+        )
+
+    if body.quantity > stock:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only {stock} item(s) available"
+        )
     item = {
         "snack_id": snack["id"],
         "name": snack["name"],
@@ -550,7 +625,16 @@ async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depen
         "subtotal": float(snack["price"]) * body.quantity,
         "added_at": iso(now_utc()),
     }
-    snacks = s.get("snacks", []) + [item]
+    snacks = s.get("snacks", [])
+
+    # Merge only with the immediately previous snack if it's the same
+    if snacks and snacks[-1]["snack_id"] == item["snack_id"]:
+        snacks[-1]["quantity"] += item["quantity"]
+        snacks[-1]["subtotal"] = (
+            snacks[-1]["quantity"] * snacks[-1]["price"]
+        )
+    else:
+        snacks.append(item)
     snacks_amount = sum(i["subtotal"] for i in snacks)
     await db.sessions.update_one(
         {"id": session_id},
@@ -570,18 +654,55 @@ async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depen
     return s
 
 @api.delete("/sessions/{session_id}/snacks/{index}")
-async def remove_snack_from_session(session_id: str, index: int, user=Depends(require_permission("manage_sessions"))):
+async def remove_snack_from_session(
+    session_id: str,
+    index: int,
+    user=Depends(require_permission("manage_sessions"))
+):
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
+
     snacks = s.get("snacks", [])
+
     if index < 0 or index >= len(snacks):
         raise HTTPException(status_code=404, detail="Item not found")
-    removed = snacks.pop(index)
+
+    item = snacks[index]
+
+    if item["quantity"] > 1:
+        # Decrease quantity by 1
+        item["quantity"] -= 1
+        item["subtotal"] = item["quantity"] * item["price"]
+
+        # Restock only 1 item
+        await db.snacks.update_one(
+            {"id": item["snack_id"]},
+            {"$inc": {"stock_quantity": 1}}
+        )
+
+    else:
+        # Remove snack completely
+        removed = snacks.pop(index)
+
+        await db.snacks.update_one(
+            {"id": removed["snack_id"]},
+            {"$inc": {"stock_quantity": 1}}
+        )
+
+    # Recalculate total snacks amount
     snacks_amount = sum(i["subtotal"] for i in snacks)
-    await db.sessions.update_one({"id": session_id}, {"$set": {"snacks": snacks, "snacks_amount": snacks_amount}})
-    # restock
-    await db.snacks.update_one({"id": removed["snack_id"]}, {"$inc": {"stock_quantity": removed["quantity"]}})
+
+    await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$set": {
+                "snacks": snacks,
+                "snacks_amount": snacks_amount,
+            }
+        }
+    )
+
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     await _session_with_details(s)
     return s
@@ -643,6 +764,16 @@ async def resume_session(
 
     paused_seconds += (now_utc() - pause_started_at).total_seconds()
 
+    current_frame = s.get("current_frame")
+
+    pause_duration = (now_utc() - pause_started_at).total_seconds()
+
+    if current_frame:
+        current_frame["paused_seconds"] = (
+            current_frame.get("paused_seconds", 0)
+            + pause_duration
+        )
+
     await db.sessions.update_one(
         {"id": session_id},
         {
@@ -651,6 +782,7 @@ async def resume_session(
                 "pause_started_at": None,
                 "paused_seconds": paused_seconds,
                 "pause_reason": None,
+                "current_frame": current_frame,
             }
         },
     )
@@ -660,8 +792,15 @@ async def resume_session(
 
     return s
 
+class FinalizePreviewBody(BaseModel):
+    player_a: str
+    player_b: str
+    winner: str
+    paid_by: str
+    notes: str = ""
+
 @api.post("/sessions/{session_id}/finalize-preview")
-async def finalize_preview(session_id: str, user=Depends(require_permission("manage_sessions"))):
+async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depends(require_permission("manage_sessions"))):
     """Computes an EPHEMERAL billing snapshot for the End & Bill modal.
     Does NOT persist any freeze state. Each call returns a FRESH snapshot from the current time.
     On modal cancel, the caller discards the snapshot and the session keeps running live.
@@ -685,14 +824,50 @@ async def finalize_preview(session_id: str, user=Depends(require_permission("man
     duration_hours = duration_seconds / 3600.0
     rate = float(s["rate_used"])
     frames = s.get("frames", [])
-    if frames:
-        table_amount_raw = sum(float(f.get("amount", 0)) for f in frames)
-        if s.get("current_frame"):
-            cf = s["current_frame"]
-            cf_seconds = max(0.0, (end - datetime.fromisoformat(cf["start_time"])).total_seconds())
-            table_amount_raw += (cf_seconds / 3600.0) * rate
-    else:
+
+    # Always start with completed frames
+    table_amount_raw = sum(float(f.get("amount", 0)) for f in frames)
+
+    # Always add the currently running frame (preview only)
+    cf = None
+
+    if s.get("current_frame"):
+        cf = dict(s["current_frame"])
+
+        cf["player_a"] = body.player_a
+        cf["player_b"] = body.player_b
+        cf["winner"] = body.winner
+        cf["loser"] = (
+            body.player_b
+            if body.winner == body.player_a
+            else body.player_a
+        )
+        cf["paid_by"] = body.paid_by
+        cf["notes"] = body.notes
+
+        frame_start = datetime.fromisoformat(cf["start_time"])
+
+        cf_seconds = max(
+            0,
+            (end - frame_start).total_seconds() - paused_seconds
+        )
+
+        cf_amount = round((cf_seconds / 3600.0) * rate, 2)
+
+        cf["end_time"] = iso(end)
+        cf["duration_minutes"] = int(cf_seconds / 60)
+        cf["amount"] = cf_amount
+
+        table_amount_raw += cf_amount
+
+    # If there are no frames at all, fall back to whole session
+    if not frames and not s.get("current_frame"):
         table_amount_raw = duration_hours * rate
+        print({
+    "frames_total": sum(float(f.get("amount", 0)) for f in frames),
+    "current_frame_amount": cf["amount"] if cf else None,
+    "table_amount_raw": table_amount_raw,
+})
     table_amount = round(table_amount_raw, 2)
     snacks_amount = float(s.get("snacks_amount", 0))
     grand_total_exact = round(table_amount + snacks_amount, 2)
@@ -703,6 +878,7 @@ async def finalize_preview(session_id: str, user=Depends(require_permission("man
         s.pop(k, None)
     return {
         **s,
+        "preview_frame": cf if s.get("current_frame") else None,
         "freeze_snapshot": {
             "end_time": iso(end),
             "duration_seconds": int(duration_seconds),
@@ -897,33 +1073,62 @@ async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permis
     frame = s.get("current_frame")
     if not frame:
         raise HTTPException(status_code=400, detail="No active frame. Start one first.")
+    frame["player_a"] = body.player_a
+    frame["player_b"] = body.player_b
+
     frame["winner"] = body.winner
-    frame["loser"] = body.loser
+
+    frame["loser"] = (
+        body.player_b
+        if body.winner == body.player_a
+        else body.player_a
+    )
+
     frame["paid_by"] = body.paid_by
     frame["notes"] = body.notes or ""
     frame["end_time"] = iso(now_utc())
-    dur_sec = max(0.0, (datetime.fromisoformat(frame["end_time"]) - datetime.fromisoformat(frame["start_time"])).total_seconds())
+    elapsed = (datetime.fromisoformat(frame["end_time"])- datetime.fromisoformat(frame["start_time"])).total_seconds()
+    frame_paused = frame.get("paused_seconds", 0)
+
+    # If the session is still paused when ending the frame,
+    # include the current pause duration.
+    if s.get("is_paused") and s.get("pause_started_at"):
+        pause_started = datetime.fromisoformat(s["pause_started_at"])
+        frame_paused += (now_utc() - pause_started).total_seconds()
+
+    dur_sec = max(
+        0,
+        elapsed - frame_paused)
+    dur_sec = max( 0, elapsed - frame.get("paused_seconds", 0))
     frame["duration_minutes"] = int(dur_sec / 60)
     frame["amount"] = round((dur_sec / 3600.0) * float(s.get("rate_used", 0)), 2)
     frames = s.get("frames", []) + [frame]
-    # Auto-start next frame (same players)
+    # Auto-start next frame unless this is the final frame
     next_frame = {
         "id": str(uuid.uuid4()),
-        "frame_number": len(frames) + 1,
-        "player_a": frame.get("player_a", ""),
-        "player_b": frame.get("player_b", ""),
+        "frame_number": frame["frame_number"] + 1,
+        "player_a": "",
+        "player_b": "",
         "start_time": iso(now_utc()),
         "end_time": None,
-        "is_paused": False,
-        "pause_started_at": None,
-        "paused_seconds": 0,
         "winner": None,
         "loser": None,
         "paid_by": None,
         "notes": "",
         "duration_minutes": 0,
+        "paused_seconds": 0,
     }
-    await db.sessions.update_one({"id": session_id}, {"$set": {"frames": frames, "current_frame": next_frame}})
+
+    await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$set": {
+                "frames": frames,
+                "current_frame": next_frame,
+            }
+        },
+    )
+
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     await _session_with_details(s)
     return s
@@ -1449,7 +1654,7 @@ async def seed():
     await db.tables.create_index("table_number", unique=True)
     await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
 
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@snooker.com")
+    admin_email = os.environ.get("ADMIN_EMAIL", "aryansingh252019@gmail.com")
     admin_pw = os.environ.get("ADMIN_PASSWORD", "admin123")
     if not await db.users.find_one({"email": admin_email}):
         await db.users.insert_one({

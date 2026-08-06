@@ -13,6 +13,94 @@ function elapsed(startIso) {
   return { display: `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`, hours: ms / 3600000 };
 }
 
+function EndFrameModal({ current, onClose, onEnd }) {
+  const [playerA, setPlayerA] = useState("");
+  const [playerB, setPlayerB] = useState("");
+  const [winner, setWinner] = useState("");
+  const [paidBy, setPaidBy] = useState("");
+  const [notes, setNotes] = useState("");
+  const players = [playerA, playerB].filter(Boolean);
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full max-w-sm bg-[#141414] border border-[#262626] rounded-2xl p-5">
+        <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Trophy className="w-4 h-4 text-amber-400" /> End Frame </h3>
+        <div className="space-y-3">
+          <div>
+            <div>
+            <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
+              Player A
+            </div>
+
+            <input
+              value={playerA}
+              onChange={(e) => setPlayerA(e.target.value)}
+              placeholder="Player A"
+              className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-amber-500"
+            />
+          </div>
+
+          <div>
+            <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
+              Player B
+            </div>
+
+            <input
+              value={playerB}
+              onChange={(e) => setPlayerB(e.target.value)}
+              placeholder="Player B"
+              className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-amber-500"
+            />
+          </div>
+            <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Winner</div>
+            <div className="grid grid-cols-2 gap-2">{players.map((p) => <button key={p} type="button" onClick={() => setWinner(p)} data-testid={`winner-${p}`} className={`h-11 rounded-lg font-semibold text-sm border ${winner === p ? "bg-green-700 border-green-700 text-white" : "bg-[#0f0f0f] border-[#262626] text-gray-300 hover:border-green-700/40"}`}>{p || "—"}</button>)}</div>
+          </div>
+          <div><div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Who Pays?</div>
+            <div className="grid grid-cols-2 gap-2">{players.map((p) => <button key={p} type="button" onClick={() => setPaidBy(p)} data-testid={`paid-${p}`} className={`h-11 rounded-lg font-semibold text-sm border ${paidBy === p ? "bg-amber-600 border-amber-600 text-white" : "bg-[#0f0f0f] border-[#262626] text-gray-300 hover:border-amber-500/40"}`}>{p || "—"}</button>)}</div>
+          </div>
+          <div><div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Notes</div><input value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-amber-500" /></div>
+          <div className="flex gap-3 pt-2">
+  <button
+    type="button"
+    onClick={() => {
+    setWinner("");
+    setPaidBy("");
+    setPlayerA("");
+    setPlayerB("");
+    setNotes("");
+    onClose();
+}}
+    className="w-28 h-11 rounded-xl border border-[#303030] bg-[#1a1a1a] hover:bg-[#222] text-gray-300 font-semibold"
+  >
+    Cancel
+  </button>
+
+  <button
+    type="button"
+    onClick={() => {
+      if (!playerA.trim() || !playerB.trim())
+        return toast.error("Enter both player names");
+
+      if (!winner)
+        return toast.error("Choose winner");
+
+      if (!paidBy)
+        return toast.error("Choose who paid");
+
+      onEnd(playerA, playerB, winner, paidBy, notes);
+    }}
+    className="flex-1 h-11 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center justify-center gap-2"
+  >
+    <RotateCw className="w-4 h-4" />
+    Save & Next Frame
+  </button>
+</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function Sessions() {
   const [sessions, setSessions] = useState([]);
   const [snacks, setSnacks] = useState([]);
@@ -20,6 +108,9 @@ export default function Sessions() {
   const [addSnack, setAddSnack] = useState(null); // session
   const [endModal, setEndModal] = useState(null); // session
   const [billingSessionId, setBillingSessionId] = useState(null); //currently in billing mode
+  const [pendingFrame, setPendingFrame] = useState(null);
+  const [billingMode, setBillingMode] = useState(false);
+  const [frameModalSession, setFrameModalSession] = useState(null);
   const navigate = useNavigate();
 
   const load = async () => {
@@ -29,12 +120,23 @@ export default function Sessions() {
   useEffect(() => { load(); const t1 = setInterval(load, 8000); const t2 = setInterval(() => setTick((x) => x + 1), 1000); return () => { clearInterval(t1); clearInterval(t2); }; }, []);
 
   const addSnackToSession = async (sessionId, snackId, qty) => {
-    try {
-      await api.post(`/sessions/${sessionId}/snacks`, { snack_id: snackId, quantity: qty });
-      toast.success("Snack added");
-      setAddSnack(null); load();
-    } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
-  };
+  try {
+    await api.post(`/sessions/${sessionId}/snacks`, {
+      snack_id: snackId,
+      quantity: qty,
+    });
+
+    toast.success("Snack added");
+
+    await load(); // Refresh stock and session
+
+    // DON'T close the popup
+    // setAddSnack(null);
+
+  } catch (e) {
+    toast.error(formatApiErrorDetail(e.response?.data?.detail));
+  }
+};
 
   const removeSnack = async (sessionId, idx) => {
     try { await api.delete(`/sessions/${sessionId}/snacks/${idx}`); load(); }
@@ -57,21 +159,28 @@ export default function Sessions() {
   }
 };
 
-  const openEndModal = async (session) => {
+  const openEndModal = async (session, alreadyPaused = false,frameData = null) => {
     try {
 
-        // Pause session for billing
-        await api.post(
-            `/sessions/${session.id}/pause?reason=BILLING`
-        );
+        if (!alreadyPaused) {
+          await api.post(
+              `/sessions/${session.id}/pause?reason=BILLING`
+          );
 
-        // Refresh active sessions so timer freezes immediately
-        await load();
+          await load();
+      }
 
         // Get billing preview
         const { data } = await api.post(
-            `/sessions/${session.id}/finalize-preview`
-        );
+    `/sessions/${session.id}/finalize-preview`,
+    {
+        player_a: frameData.playerA,
+        player_b: frameData.playerB,
+        winner: frameData.winner,
+        paid_by: frameData.paidBy,
+        notes: frameData.notes,
+    }
+);
 
         setBillingSessionId(session.id);
 
@@ -104,6 +213,7 @@ export default function Sessions() {
       toast.success(`Session ended. Bill ${data.invoice_no}`);
       setBillingSessionId(null);
       setEndModal(null);
+      await load();
       navigate(`/bill/${data.id}`);
     } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
   };
@@ -112,10 +222,30 @@ export default function Sessions() {
     try { await api.post(`/sessions/${sessionId}/frames/start`, { player_a: playerA, player_b: playerB }); toast.success("Frame started"); load(); }
     catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
   };
-  const endFrame = async (sessionId, winner, loser, paidBy, notes) => {
-    try { await api.post(`/sessions/${sessionId}/frames/end`, { winner, loser, paid_by: paidBy, notes: notes || "" }); toast.success("Frame recorded · next frame auto-started"); load(); }
-    catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
-  };
+  const endFrame = async (
+  sessionId,
+  playerA,
+  playerB,
+  winner,
+  paidBy,
+  notes) => {
+  try {
+    await api.post(`/sessions/${sessionId}/frames/end`, {
+      player_a: playerA,
+      player_b: playerB,
+      winner,
+      paid_by: paidBy,
+      notes: notes || "",
+    });
+
+    toast.success("Frame recorded");
+
+    await load();
+  } catch (e) {
+    toast.error(formatApiErrorDetail(e.response?.data?.detail));
+    throw e;
+  }
+};
 
   return (
     <div className="space-y-6" data-testid="sessions-page">
@@ -165,7 +295,7 @@ export default function Sessions() {
                 <Stat label="Est. Bill" value={inr(bill)} accent="green" />
               </div>
               <div className="px-6 pb-4">
-                <FramesSection session={s} onStartFrame={startFrame} onEndFrame={endFrame} />
+                <FramesSection session={s} onOpenEndFrame={(session, isBilling) => {setBillingMode(isBilling); setFrameModalSession(session); }}/>
               </div>
               <div className="px-6 pb-4">
                 <div className="text-xs uppercase tracking-wider text-gray-500 font-bold mb-2">Snacks ({s.snacks?.length || 0})</div>
@@ -211,7 +341,31 @@ export default function Sessions() {
                 </button>
 
                 <button
-                  onClick={() => openEndModal(s)}
+                  onClick={async () => {
+                  try {
+
+                      // Pause only if it isn't already paused
+                      if (!s.is_paused) {
+                          await api.post(
+                              `/sessions/${s.id}/pause?reason=BILLING`
+                          );
+                      }
+
+                      await load();
+
+                      const refreshed = (
+                          await api.get("/sessions/active")
+                      ).data.find(x => x.id === s.id);
+
+                      setBillingMode(true);
+                      setFrameModalSession(refreshed);
+
+                  } catch (e) {
+                      toast.error(
+                          formatApiErrorDetail(e.response?.data?.detail)
+                      );
+                  }
+              }}
                   data-testid={`end-session-${s.table_number}`}
                   className="flex-1 h-11 rounded-xl bg-red-900/40 hover:bg-red-900/60 border border-red-800 text-red-100 font-semibold flex items-center justify-center gap-2"
                 >
@@ -229,6 +383,54 @@ export default function Sessions() {
           <SnackPicker snacks={snacks} onPick={(snack, qty) => addSnackToSession(addSnack.id, snack.id, qty)} />
         </Modal>
       )}
+      {frameModalSession && (
+  <EndFrameModal
+    current={frameModalSession.current_frame}
+    onClose={() => {
+      setFrameModalSession(null);
+
+      if (billingMode) {
+        api.post(`/sessions/${frameModalSession.id}/resume`);
+        setBillingMode(false);
+      }
+    }}
+    onEnd={async (playerA, playerB, winner, paidBy, notes) => {
+
+    // Normal End Frame
+    if (!billingMode) {
+
+        await endFrame(
+            frameModalSession.id,
+            playerA,
+            playerB,
+            winner,
+            paidBy,
+            notes
+        );
+
+        setFrameModalSession(null);
+        return;
+    }
+
+    // End & Bill flow
+    const session = frameModalSession;
+
+    const frameData = {
+    playerA,
+    playerB,
+    winner,
+    paidBy,
+    notes,
+    };
+
+    setPendingFrame(frameData);
+
+    await openEndModal(session, true, frameData);
+
+    setFrameModalSession(null);
+}}
+  />
+)}
       {endModal && (
         <Modal
 title="End session & generate bill"
@@ -253,13 +455,26 @@ onClose={async () => {
   );
 }
 
-function FramesSection({ session, onStartFrame, onEndFrame }) {
-  const [startOpen, setStartOpen] = useState(false);
+function FramesSection({session, onOpenEndFrame,}) {
+
   const [endOpen, setEndOpen] = useState(false);
-  const [playerA, setPlayerA] = useState("");
-  const [playerB, setPlayerB] = useState("");
+  useEffect(() => {
+    const handler = (e) => {
+        if (e.detail.sessionId === session.id) {
+            setEndOpen(true);
+        }
+    };
+
+    document.addEventListener("open-end-frame", handler);
+
+    return () => {
+        document.removeEventListener("open-end-frame", handler);
+      };
+    }, [session.id]);
   const frames = session.frames || [];
   const current = session.current_frame;
+  
+  
 
   // Stats
   const wins = {}; const losses = {}; const paid = {};
@@ -274,11 +489,9 @@ function FramesSection({ session, onStartFrame, onEndFrame }) {
     <div className="mt-2 p-4 rounded-xl bg-[#0d0d0d] border border-[#262626]">
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs uppercase tracking-wider text-gray-500 font-bold flex items-center gap-2"><Trophy className="w-3.5 h-3.5 text-amber-400" /> Frames · {frames.length} played</div>
-        {!current && (
-          <button onClick={() => setStartOpen(true)} data-testid={`start-frame-${session.table_number}`} className="text-xs h-8 px-3 rounded-lg bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-1"><Flag className="w-3 h-3" /> Start Frame</button>
-        )}
+
         {current && (
-          <button onClick={() => setEndOpen(true)} data-testid={`end-frame-${session.table_number}`} className="text-xs h-8 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center gap-1"><Trophy className="w-3 h-3" /> Record Winner</button>
+          <button onClick={() => onOpenEndFrame(session, false)} data-testid={`end-frame-${session.table_number}`} className="text-xs h-8 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center gap-1"><Trophy className="w-3 h-3" /> End Frame</button>
         )}
       </div>
 
@@ -309,48 +522,6 @@ function FramesSection({ session, onStartFrame, onEndFrame }) {
           ))}
         </div>
       )}
-
-      {startOpen && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setStartOpen(false)}>
-          <div onClick={(e) => e.stopPropagation()} className="w-full max-w-sm bg-[#141414] border border-[#262626] rounded-2xl p-5">
-            <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Flag className="w-4 h-4 text-green-400" /> Start Frame</h3>
-            <div className="space-y-3">
-              <div><div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Player A</div><input value={playerA} onChange={(e) => setPlayerA(e.target.value)} data-testid="frame-player-a" placeholder="e.g. Rahul" className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-green-700" /></div>
-              <div><div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Player B</div><input value={playerB} onChange={(e) => setPlayerB(e.target.value)} data-testid="frame-player-b" placeholder="e.g. Amit" className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-green-700" /></div>
-              <button onClick={() => { onStartFrame(session.id, playerA, playerB); setStartOpen(false); }} data-testid="confirm-start-frame" className="w-full h-11 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold">Start Frame</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {endOpen && current && (
-        <EndFrameModal current={current} onClose={() => setEndOpen(false)} onEnd={(w, l, p, n) => { onEndFrame(session.id, w, l, p, n); setEndOpen(false); }} />
-      )}
-    </div>
-  );
-}
-
-function EndFrameModal({ current, onClose, onEnd }) {
-  const players = [current.player_a, current.player_b].filter(Boolean);
-  const [winner, setWinner] = useState(players[0] || "");
-  const [paidBy, setPaidBy] = useState("");
-  const [notes, setNotes] = useState("");
-  const loser = players.find((p) => p !== winner) || "";
-  return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} className="w-full max-w-sm bg-[#141414] border border-[#262626] rounded-2xl p-5">
-        <h3 className="text-lg font-bold mb-4 flex items-center gap-2"><Trophy className="w-4 h-4 text-amber-400" /> Frame {current.frame_number} Result</h3>
-        <div className="space-y-3">
-          <div><div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Winner</div>
-            <div className="grid grid-cols-2 gap-2">{players.map((p) => <button key={p} type="button" onClick={() => setWinner(p)} data-testid={`winner-${p}`} className={`h-11 rounded-lg font-semibold text-sm border ${winner === p ? "bg-green-700 border-green-700 text-white" : "bg-[#0f0f0f] border-[#262626] text-gray-300 hover:border-green-700/40"}`}>{p || "—"}</button>)}</div>
-          </div>
-          <div><div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Who Pays?</div>
-            <div className="grid grid-cols-2 gap-2">{players.map((p) => <button key={p} type="button" onClick={() => setPaidBy(p)} data-testid={`paid-${p}`} className={`h-11 rounded-lg font-semibold text-sm border ${paidBy === p ? "bg-amber-600 border-amber-600 text-white" : "bg-[#0f0f0f] border-[#262626] text-gray-300 hover:border-amber-500/40"}`}>{p || "—"}</button>)}</div>
-          </div>
-          <div><div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">Notes</div><input value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-amber-500" /></div>
-          <button onClick={() => { if (!winner || !paidBy) return toast.error("Choose winner and payer"); onEnd(winner, loser, paidBy, notes); }} data-testid="confirm-end-frame" className="w-full h-11 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center justify-center gap-2"><RotateCw className="w-4 h-4" /> Save & Start Next Frame</button>
-        </div>
-      </div>
     </div>
   );
 }
@@ -436,11 +607,16 @@ function SnackPicker({ snacks, onPick }) {
                 />
 
                 <button
+                  disabled={s.stock_quantity <= 0}
                   onClick={() => onPick(s, qty[s.id] || 1)}
                   data-testid={`add-${s.name}`}
-                  className="h-10 px-4 rounded-lg bg-green-700 hover:bg-green-800 text-white text-sm font-semibold"
+                  className={`h-10 px-4 rounded-lg text-white text-sm font-semibold transition-colors ${
+                    s.stock_quantity <= 0
+                      ? "bg-red-700 hover:bg-red-700 cursor-not-allowed"
+                      : "bg-green-700 hover:bg-green-800"
+                  }`}
                 >
-                  Add
+                  {s.stock_quantity <= 0 ? "Out of Stock" : "Add"}
                 </button>
               </div>
             </div>
@@ -532,6 +708,10 @@ function EndForm({ session, snapshot, onSubmit }) {
   const remaining = total - enteredTotal;
   const balanced = remaining === 0;
 
+  const previewFrames = session.preview_frame
+  ? [...(session.frames || []), session.preview_frame]
+  : (session.frames || []);
+
   const submit = () => {
     let payments;
     if (split) {
@@ -548,11 +728,11 @@ function EndForm({ session, snapshot, onSubmit }) {
     <div className="flex flex-col min-h-0 flex-1" data-testid="end-form-frozen">
       {/* Scrollable body */}
       <div className="px-5 py-5 pr-7 space-y-4 overflow-y-auto flex-1">
-        {session.frames?.length > 0 && (
+        {previewFrames.length > 0 && (
           <div className="p-3 rounded-xl bg-[#0f0f0f] border border-[#262626]">
             <div className="text-[10px] uppercase tracking-wider text-gray-500 font-bold mb-2">Frame Breakdown</div>
             <div className="space-y-1 max-h-32 overflow-y-auto text-xs">
-              {session.frames.map((f) => (
+              {previewFrames.map((f) => (
                 <div key={f.id} className="flex items-center justify-between">
                   <span className="text-gray-400">Frame {f.frame_number} · {f.duration_minutes}m</span>
                   <span className="font-bold font-mono text-white">{inr(f.amount || 0)}</span>

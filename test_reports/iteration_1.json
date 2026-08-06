@@ -28,7 +28,7 @@
   ],
   "updated_files": ["/app/backend/tests/backend_test.py", "/app/test_reports/iteration_1.json"],
   "success_rate": {"backend": "94%", "frontend": "100%"},
-  "test_credentials": "admin@snooker.com/admin123, staff@snooker.com/staff123 (from /app/memory/test_credentials.md)",
+  "test_credentials": "aryansingh252019@gmail.com/admin123, staff@snooker.com/staff123 (from /app/memory/test_credentials.md)",
   "seed_data_creation": "Used existing seeded data; tests create/delete TEST_* prefixed resources and clean up.",
   "retest_needed": true,
   "main_agent_can_self_test": true,

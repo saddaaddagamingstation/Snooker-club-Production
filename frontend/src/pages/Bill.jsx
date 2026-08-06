@@ -18,6 +18,25 @@ export default function Bill() {
   const hours = Math.floor(s.duration_minutes / 60);
   const minutes = s.duration_minutes % 60;
 
+  const groupedSnacks = Object.values(
+  (s.snacks || []).reduce((acc, item) => {
+    const key = item.name;
+
+    if (!acc[key]) {
+      acc[key] = {
+        ...item,
+        quantity: Number(item.quantity || 1),
+        subtotal: Number(item.subtotal || item.price),
+      };
+    } else {
+      acc[key].quantity += Number(item.quantity || 1);
+      acc[key].subtotal += Number(item.subtotal || item.price);
+    }
+
+    return acc;
+  }, {})
+);
+
   const shareWA = () => {
     const frameLines = (s.frames || []).map((f) => `  Frame ${f.frame_number} · ${f.duration_minutes}m · ${inr(f.amount || 0)}`);
     const payLines = (s.payments || []).map((p) => `  ${p.method.toUpperCase()}: ${inr(p.amount)}`);
@@ -109,7 +128,7 @@ export default function Bill() {
                   <td className="py-2.5 text-right font-mono font-bold">{inr(s.table_amount)}</td>
                 </tr>
               )}
-              {s.snacks?.map((it, i) => (
+              {groupedSnacks.map((it, i) => (
                 <tr key={`sn-${i}`} className="border-t border-[#262626]">
                   <td className="py-2.5">{it.name}</td>
                   <td className="py-2.5 text-right font-mono">{it.quantity}</td>
