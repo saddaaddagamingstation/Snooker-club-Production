@@ -77,16 +77,13 @@ function EndFrameModal({ current, onClose, onEnd }) {
   <button
     type="button"
     onClick={() => {
-      if (!playerA.trim() || !playerB.trim())
-        return toast.error("Enter both player names");
-
-      if (!winner)
-        return toast.error("Choose winner");
-
-      if (!paidBy)
-        return toast.error("Choose who paid");
-
-      onEnd(playerA, playerB, winner, paidBy, notes);
+    onEnd(
+      playerA.trim(),
+      playerB.trim(),
+      winner || "",
+      paidBy || "",
+      notes.trim()
+    );
     }}
     className="flex-1 h-11 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center justify-center gap-2"
   >

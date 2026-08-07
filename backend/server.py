@@ -124,10 +124,10 @@ class SessionEnd(BaseModel):
 
 
 class FrameEnd(BaseModel):
-    player_a: str
-    player_b: str   
-    winner: str
-    paid_by: str
+    player_a: Optional[str] = ""
+    player_b: Optional[str] = ""
+    winner: Optional[str] = ""
+    paid_by: Optional[str] = ""
     notes: Optional[str] = ""
 
 
@@ -793,11 +793,11 @@ async def resume_session(
     return s
 
 class FinalizePreviewBody(BaseModel):
-    player_a: str
-    player_b: str
-    winner: str
-    paid_by: str
-    notes: str = ""
+    player_a: Optional[str] = ""
+    player_b: Optional[str] = ""
+    winner: Optional[str] = ""
+    paid_by: Optional[str] = ""
+    notes: Optional[str] = ""
 
 @api.post("/sessions/{session_id}/finalize-preview")
 async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depends(require_permission("manage_sessions"))):
@@ -837,11 +837,12 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
         cf["player_a"] = body.player_a
         cf["player_b"] = body.player_b
         cf["winner"] = body.winner
-        cf["loser"] = (
-            body.player_b
-            if body.winner == body.player_a
-            else body.player_a
-        )
+        if body.winner == body.player_a:
+            cf["loser"] = body.player_b
+        elif body.winner == body.player_b:
+            cf["loser"] = body.player_a
+        else:
+            cf["loser"] = ""
         cf["paid_by"] = body.paid_by
         cf["notes"] = body.notes
 
@@ -1076,13 +1077,14 @@ async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permis
     frame["player_a"] = body.player_a
     frame["player_b"] = body.player_b
 
-    frame["winner"] = body.winner
+    frame["winner"] = body.winner or ""
 
-    frame["loser"] = (
-        body.player_b
-        if body.winner == body.player_a
-        else body.player_a
-    )
+    if body.winner == body.player_a:
+        frame["loser"] = body.player_b
+    elif body.winner == body.player_b:
+        frame["loser"] = body.player_a
+    else:
+        frame["loser"] = ""
 
     frame["paid_by"] = body.paid_by
     frame["notes"] = body.notes or ""
