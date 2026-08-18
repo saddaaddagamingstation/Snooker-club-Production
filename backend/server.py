@@ -531,6 +531,87 @@ async def get_session(session_id: str, user=Depends(get_current_user)):
     await _session_with_details(s)
     return s
 
+@api.delete("/sessions/{session_id}")
+async def clear_session(
+    session_id: str,
+    user=Depends(require_permission("manage_sessions"))
+):
+    # Find the session
+    s = await db.sessions.find_one(
+        {"id": session_id},
+        {"_id": 0}
+    )
+
+    if not s:
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found"
+        )
+
+    # Only active sessions can be cleared
+    if s.get("status") != "active":
+        raise HTTPException(
+            status_code=400,
+            detail="Only active sessions can be cleared"
+        )
+
+    # -----------------------------------------
+    # 1. Restore snacks back to inventory
+    # -----------------------------------------
+    for item in s.get("snacks", []):
+        snack_id = item.get("snack_id")
+        quantity = int(item.get("quantity", 0))
+
+        if snack_id and quantity > 0:
+            await db.snacks.update_one(
+                {"id": snack_id},
+                {"$inc": {"stock_quantity": quantity}}
+            )
+
+    # -----------------------------------------
+    # 2. Make the table available again
+    # -----------------------------------------
+    await db.tables.update_one(
+        {"id": s["table_id"]},
+        {"$set": {"status": "available"}}
+    )
+
+    # -----------------------------------------
+    # 3. Delete notifications related to session
+    # -----------------------------------------
+    await db.notifications.delete_many({
+        "meta.session_id": session_id
+    })
+
+    # -----------------------------------------
+    # 4. Delete any payment records if they exist
+    # -----------------------------------------
+    await db.payments.delete_many({
+        "session_id": session_id
+    })
+
+    # -----------------------------------------
+    # 5. Permanently delete the session
+    # -----------------------------------------
+    result = await db.sessions.delete_one({
+        "id": session_id,
+        "status": "active"
+    })
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Session was already cleared"
+        )
+
+    return {
+        "ok": True,
+        "message": "Session cleared successfully",
+        "session_id": session_id,
+        "table_id": s["table_id"],
+        "table_number": s["table_number"]
+    }
+
 @api.post("/sessions/start")
 async def start_session(body: SessionStart, user=Depends(require_permission("manage_sessions"))):
     table = await db.tables.find_one({"id": body.table_id}, {"_id": 0})

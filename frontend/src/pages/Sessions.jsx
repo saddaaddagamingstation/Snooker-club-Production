@@ -108,6 +108,7 @@ export default function Sessions() {
   const [pendingFrame, setPendingFrame] = useState(null);
   const [billingMode, setBillingMode] = useState(false);
   const [frameModalSession, setFrameModalSession] = useState(null);
+  const [clearSessionTarget, setClearSessionTarget] = useState(null);
   const navigate = useNavigate();
 
   const load = async () => {
@@ -155,6 +156,23 @@ export default function Sessions() {
     toast.error(formatApiErrorDetail(e.response?.data?.detail));
   }
 };
+
+  const clearSession = async (sessionId) => {
+  try {
+    await api.delete(`/sessions/${sessionId}`);
+
+    toast.success("Session cleared");
+
+    setClearSessionTarget(null);
+
+    await load();
+  } catch (e) {
+    toast.error(
+      formatApiErrorDetail(e.response?.data?.detail)
+    );
+  }
+};
+
 
   const openEndModal = async (session, alreadyPaused = false,frameData = null) => {
     try {
@@ -338,6 +356,15 @@ export default function Sessions() {
                 </button>
 
                 <button
+  onClick={() => setClearSessionTarget(s)}
+  data-testid={`clear-session-${s.table_number}`}
+  className="flex-1 h-11 rounded-xl bg-gray-500/10 hover:bg-gray-500/20 border border-gray-500/30 text-gray-300 hover:text-white font-semibold flex items-center justify-center gap-2"
+>
+  <Trash2 className="w-4 h-4" />
+  Clear
+</button>
+
+                <button
                   onClick={async () => {
                   try {
 
@@ -427,6 +454,48 @@ export default function Sessions() {
     setFrameModalSession(null);
 }}
   />
+)}
+
+{clearSessionTarget && (
+  <Modal
+    title="Clear Session?"
+    onClose={() => setClearSessionTarget(null)}
+  >
+    <div className="p-5">
+      <p className="text-white font-semibold text-base">
+        Clear Table {clearSessionTarget.table_number}?
+      </p>
+
+      <p className="text-gray-400 text-sm mt-2 leading-6">
+        This will permanently delete this active session.
+        No bill will be generated and it will not appear in session history.
+      </p>
+
+      <p className="text-amber-400 text-sm mt-3">
+        Any snacks added to this session will be returned to inventory.
+      </p>
+
+      <div className="flex gap-3 mt-6">
+        <button
+          type="button"
+          onClick={() => setClearSessionTarget(null)}
+          className="flex-1 h-11 rounded-xl border border-[#303030] bg-[#1a1a1a] hover:bg-[#222] text-gray-300 font-semibold"
+        >
+          No
+        </button>
+
+        <button
+          type="button"
+          onClick={() =>
+            clearSession(clearSessionTarget.id)
+          }
+          className="flex-1 h-11 rounded-xl bg-red-900/50 hover:bg-red-900/70 border border-red-800 text-red-100 font-semibold"
+        >
+          Yes, Clear
+        </button>
+      </div>
+    </div>
+  </Modal>
 )}
       {endModal && (
         <Modal
