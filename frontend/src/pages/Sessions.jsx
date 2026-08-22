@@ -88,7 +88,7 @@ function EndFrameModal({ current, onClose, onEnd }) {
     className="flex-1 h-11 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center justify-center gap-2"
   >
     <RotateCw className="w-4 h-4" />
-    Save & Next Frame
+    End Frame
   </button>
 </div>
         </div>
@@ -143,6 +143,13 @@ export default function Sessions() {
 
   const handlePauseResume = async (session) => {
   try {
+    // A frame must be active before using the normal
+    // Pause / Resume control.
+    if (!session.current_frame) {
+      toast.error("Please start a frame first.");
+      return;
+    }
+
     if (session.is_paused) {
       await api.post(`/sessions/${session.id}/resume`);
       toast.success("Session resumed");
@@ -151,9 +158,11 @@ export default function Sessions() {
       toast.success("Session paused");
     }
 
-    load();
+    await load();
   } catch (e) {
-    toast.error(formatApiErrorDetail(e.response?.data?.detail));
+    toast.error(
+      formatApiErrorDetail(e.response?.data?.detail)
+    );
   }
 };
 
@@ -233,9 +242,18 @@ export default function Sessions() {
     } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
   };
 
-  const startFrame = async (sessionId, playerA, playerB) => {
-    try { await api.post(`/sessions/${sessionId}/frames/start`, { player_a: playerA, player_b: playerB }); toast.success("Frame started"); load(); }
-    catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
+  const startFrame = async (sessionId) => {
+  try {
+    await api.post(`/sessions/${sessionId}/frames/start`, {
+      player_a: "",
+      player_b: "",
+    });
+
+    toast.success("Frame started");
+    await load();
+  } catch (e) {
+    toast.error(formatApiErrorDetail(e.response?.data?.detail));
+  }
   };
   const endFrame = async (
   sessionId,
@@ -310,7 +328,8 @@ export default function Sessions() {
                 <Stat label="Est. Bill" value={inr(bill)} accent="green" />
               </div>
               <div className="px-6 pb-4">
-                <FramesSection session={s} onOpenEndFrame={(session, isBilling) => {setBillingMode(isBilling); setFrameModalSession(session); }}/>
+                <FramesSection session={s} onOpenEndFrame={(session, isBilling) => {setBillingMode(isBilling);setFrameModalSession(session);}}
+                onStartFrame={(session) => startFrame(session.id)}/>
               </div>
               <div className="px-6 pb-4">
                 <div className="text-xs uppercase tracking-wider text-gray-500 font-bold mb-2">Snacks ({s.snacks?.length || 0})</div>
@@ -345,12 +364,12 @@ export default function Sessions() {
                   {s.is_paused ? (
   <>
     <RotateCw className="w-4 h-4" />
-    Resume
+    {s.current_frame ? "Resume" : "Resume"}
   </>
 ) : (
   <>
     <Pause className="w-4 h-4" />
-    Pause
+    {s.current_frame ? "Pause" : "Start Frame First"}
   </>
 )}
                 </button>
@@ -407,6 +426,7 @@ export default function Sessions() {
           <SnackPicker snacks={snacks} onPick={(snack, qty) => addSnackToSession(addSnack.id, snack.id, qty)} />
         </Modal>
       )}
+
       {frameModalSession && (
   <EndFrameModal
     current={frameModalSession.current_frame}
@@ -521,7 +541,7 @@ onClose={async () => {
   );
 }
 
-function FramesSection({session, onOpenEndFrame,}) {
+function FramesSection({ session, onOpenEndFrame, onStartFrame }) {
 
   const [endOpen, setEndOpen] = useState(false);
   useEffect(() => {
@@ -556,8 +576,24 @@ function FramesSection({session, onOpenEndFrame,}) {
       <div className="flex items-center justify-between mb-3">
         <div className="text-xs uppercase tracking-wider text-gray-500 font-bold flex items-center gap-2"><Trophy className="w-3.5 h-3.5 text-amber-400" /> Frames · {frames.length} played</div>
 
-        {current && (
-          <button onClick={() => onOpenEndFrame(session, false)} data-testid={`end-frame-${session.table_number}`} className="text-xs h-8 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center gap-1"><Trophy className="w-3 h-3" /> End Frame</button>
+        {current ? (
+          <button
+            onClick={() => onOpenEndFrame(session, false)}
+            data-testid={`end-frame-${session.table_number}`}
+            className="text-xs h-8 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center gap-1"
+          >
+            <Trophy className="w-3 h-3" />
+            End Frame
+          </button>
+        ) : (
+          <button
+            onClick={() => onStartFrame(session)}
+            data-testid={`start-frame-${session.table_number}`}
+            className="text-xs h-8 px-3 rounded-lg bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-1"
+          >
+            <Flag className="w-3 h-3" />
+            Start Frame
+          </button>
         )}
       </div>
 

@@ -803,10 +803,24 @@ async def pause_session(
         raise HTTPException(status_code=400, detail="Session is not active")
 
     if s.get("is_paused"):
-        raise HTTPException(status_code=400, detail="Session is already paused")
-    
+        raise HTTPException(
+            status_code=400,
+            detail="Session is already paused"
+            )
+
+    # A session can only be manually paused while a frame is running.
+    # If no frame is active, the user must start a frame first.
+    if not s.get("current_frame"):
+        raise HTTPException(
+            status_code=400,
+            detail="Please start a frame first. You can pause the session only while a frame is running."
+        )
+
     if reason not in ["MANUAL", "BILLING"]:
-        raise HTTPException(status_code=400, detail="Invalid pause reason")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid pause reason"
+        )
 
     await db.sessions.update_one(
         {"id": session_id},
@@ -1124,75 +1138,34 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
 @api.post("/sessions/{session_id}/frames/start")
 async def start_frame(session_id: str, body: FrameStart, user=Depends(require_permission("manage_sessions"))):
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
+
     if s.get("current_frame"):
-        raise HTTPException(status_code=400, detail="A frame is already running. End it first.")
+        raise HTTPException(
+            status_code=400,
+            detail="A frame is already running. End it first."
+        )
+
+    now = now_utc()
+
+    # If the session is paused because the previous frame ended,
+    # resume it now and record the pause duration.
+    paused_seconds = s.get("paused_seconds", 0)
+
+    if s.get("is_paused") and s.get("pause_started_at"):
+        pause_started_at = datetime.fromisoformat(s["pause_started_at"])
+        paused_seconds += (now - pause_started_at).total_seconds()
+
     frame_no = len(s.get("frames", [])) + 1
+
     frame = {
         "id": str(uuid.uuid4()),
         "frame_number": frame_no,
-        "player_a": body.player_a or "",
-        "player_b": body.player_b or "",
-        "start_time": iso(now_utc()),
-        "end_time": None,
-        "winner": None,
-        "loser": None,
-        "paid_by": None,
-        "notes": "",
-        "duration_minutes": 0,
-    }
-    await db.sessions.update_one({"id": session_id}, {"$set": {"current_frame": frame}})
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    await _session_with_details(s)
-    return s
-
-@api.post("/sessions/{session_id}/frames/end")
-async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permission("manage_sessions"))):
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    if not s or s["status"] != "active":
-        raise HTTPException(status_code=400, detail="Session is not active")
-    frame = s.get("current_frame")
-    if not frame:
-        raise HTTPException(status_code=400, detail="No active frame. Start one first.")
-    frame["player_a"] = body.player_a
-    frame["player_b"] = body.player_b
-
-    frame["winner"] = body.winner or ""
-
-    if body.winner == body.player_a:
-        frame["loser"] = body.player_b
-    elif body.winner == body.player_b:
-        frame["loser"] = body.player_a
-    else:
-        frame["loser"] = ""
-
-    frame["paid_by"] = body.paid_by
-    frame["notes"] = body.notes or ""
-    frame["end_time"] = iso(now_utc())
-    elapsed = (datetime.fromisoformat(frame["end_time"])- datetime.fromisoformat(frame["start_time"])).total_seconds()
-    frame_paused = frame.get("paused_seconds", 0)
-
-    # If the session is still paused when ending the frame,
-    # include the current pause duration.
-    if s.get("is_paused") and s.get("pause_started_at"):
-        pause_started = datetime.fromisoformat(s["pause_started_at"])
-        frame_paused += (now_utc() - pause_started).total_seconds()
-
-    dur_sec = max(
-        0,
-        elapsed - frame_paused)
-    dur_sec = max( 0, elapsed - frame.get("paused_seconds", 0))
-    frame["duration_minutes"] = int(dur_sec / 60)
-    frame["amount"] = round((dur_sec / 3600.0) * float(s.get("rate_used", 0)), 2)
-    frames = s.get("frames", []) + [frame]
-    # Auto-start next frame unless this is the final frame
-    next_frame = {
-        "id": str(uuid.uuid4()),
-        "frame_number": frame["frame_number"] + 1,
         "player_a": "",
         "player_b": "",
-        "start_time": iso(now_utc()),
+        "start_time": iso(now),
         "end_time": None,
         "winner": None,
         "loser": None,
@@ -1206,8 +1179,86 @@ async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permis
         {"id": session_id},
         {
             "$set": {
+                "current_frame": frame,
+                "is_paused": False,
+                "pause_started_at": None,
+                "paused_seconds": paused_seconds,
+                "pause_reason": None,
+            }
+        },
+    )
+
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    await _session_with_details(s)
+    return s
+
+@api.post("/sessions/{session_id}/frames/end")
+async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permission("manage_sessions"))):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+
+    if not s or s["status"] != "active":
+        raise HTTPException(status_code=400, detail="Session is not active")
+
+    frame = s.get("current_frame")
+
+    if not frame:
+        raise HTTPException(
+            status_code=400,
+            detail="No active frame. Start one first."
+        )
+
+    now = now_utc()
+
+    frame["player_a"] = body.player_a or ""
+    frame["player_b"] = body.player_b or ""
+    frame["winner"] = body.winner or ""
+
+    if body.winner == body.player_a:
+        frame["loser"] = body.player_b or ""
+    elif body.winner == body.player_b:
+        frame["loser"] = body.player_a or ""
+    else:
+        frame["loser"] = ""
+
+    frame["paid_by"] = body.paid_by or ""
+    frame["notes"] = body.notes or ""
+    frame["end_time"] = iso(now)
+
+    # Calculate frame duration.
+    # If the session was manually paused during this frame,
+    # include the current pause in the frame's paused time.
+    elapsed = (
+        datetime.fromisoformat(frame["end_time"])
+        - datetime.fromisoformat(frame["start_time"])
+    ).total_seconds()
+
+    frame_paused = float(frame.get("paused_seconds", 0))
+
+    if s.get("is_paused") and s.get("pause_started_at"):
+        pause_started_at = datetime.fromisoformat(s["pause_started_at"])
+        frame_paused += (now - pause_started_at).total_seconds()
+
+    dur_sec = max(0, elapsed - frame_paused)
+
+    frame["duration_minutes"] = int(dur_sec / 60)
+    frame["amount"] = round(
+        (dur_sec / 3600.0) * float(s.get("rate_used", 0)),
+        2,
+    )
+
+    frames = s.get("frames", []) + [frame]
+
+    # Ending a frame pauses the SESSION.
+    # The session stays active and the table remains occupied.
+    await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$set": {
                 "frames": frames,
-                "current_frame": next_frame,
+                "current_frame": None,
+                "is_paused": True,
+                "pause_started_at": iso(now),
+                "pause_reason": "FRAME_END",
             }
         },
     )
