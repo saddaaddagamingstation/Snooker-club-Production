@@ -1,0 +1,130 @@
+[35mbackend/server.py[m[36m:[m[32m126[m[36m:[mclass [1;31mFrame[mEnd(BaseModel):
+[35mbackend/server.py[m[36m:[m[32m134[m[36m:[mclass [1;31mFrame[mStart(BaseModel):
+[35mbackend/server.py[m[36m:[m[32m647[m[36m:[m        "[1;31mframe[ms": [],
+[35mbackend/server.py[m[36m:[m[32m648[m[36m:[m        "current_[1;31mframe[m": {
+[35mbackend/server.py[m[36m:[m[32m650[m[36m:[m            "[1;31mframe[m_number": 1,
+[35mbackend/server.py[m[36m:[m[32m848[m[36m:[m    current_[1;31mframe[m = s.get("current_[1;31mframe[m")
+[35mbackend/server.py[m[36m:[m[32m852[m[36m:[m    if current_[1;31mframe[m:
+[35mbackend/server.py[m[36m:[m[32m853[m[36m:[m        current_[1;31mframe[m["paused_seconds"] = (
+[35mbackend/server.py[m[36m:[m[32m854[m[36m:[m            current_[1;31mframe[m.get("paused_seconds", 0)
+[35mbackend/server.py[m[36m:[m[32m866[m[36m:[m                "current_[1;31mframe[m": current_[1;31mframe[m,
+[35mbackend/server.py[m[36m:[m[32m907[m[36m:[m    [1;31mframe[ms = s.get("[1;31mframe[ms", [])
+[35mbackend/server.py[m[36m:[m[32m909[m[36m:[m    # Always start with completed [1;31mframe[ms
+[35mbackend/server.py[m[36m:[m[32m910[m[36m:[m    table_amount_raw = sum(float(f.get("amount", 0)) for f in [1;31mframe[ms)
+[35mbackend/server.py[m[36m:[m[32m912[m[36m:[m    # Always add the currently running [1;31mframe[m (preview only)
+[35mbackend/server.py[m[36m:[m[32m915[m[36m:[m    if s.get("current_[1;31mframe[m"):
+[35mbackend/server.py[m[36m:[m[32m916[m[36m:[m        cf = dict(s["current_[1;31mframe[m"])
+[35mbackend/server.py[m[36m:[m[32m930[m[36m:[m        [1;31mframe[m_start = datetime.fromisoformat(cf["start_time"])
+[35mbackend/server.py[m[36m:[m[32m934[m[36m:[m            (end - [1;31mframe[m_start).total_seconds() - paused_seconds
+[35mbackend/server.py[m[36m:[m[32m945[m[36m:[m    # If there are no [1;31mframe[ms at all, fall back to whole session
+[35mbackend/server.py[m[36m:[m[32m946[m[36m:[m    if not [1;31mframe[ms and not s.get("current_[1;31mframe[m"):
+[35mbackend/server.py[m[36m:[m[32m949[m[36m:[m    "[1;31mframe[ms_total": sum(float(f.get("amount", 0)) for f in [1;31mframe[ms),
+[35mbackend/server.py[m[36m:[m[32m950[m[36m:[m    "current_[1;31mframe[m_amount": cf["amount"] if cf else None,
+[35mbackend/server.py[m[36m:[m[32m963[m[36m:[m        "preview_[1;31mframe[m": cf if s.get("current_[1;31mframe[m") else None,
+[35mbackend/server.py[m[36m:[m[32m1025[m[36m:[m    # Close current [1;31mframe[m (if any) at the authoritative end timestamp — BEFORE writing session
+[35mbackend/server.py[m[36m:[m[32m1026[m[36m:[m    [1;31mframe[ms = list(s.get("[1;31mframe[ms") or [])
+[35mbackend/server.py[m[36m:[m[32m1027[m[36m:[m    if s.get("current_[1;31mframe[m"):
+[35mbackend/server.py[m[36m:[m[32m1028[m[36m:[m        [1;31mframe[m = dict(s["current_[1;31mframe[m"])
+[35mbackend/server.py[m[36m:[m[32m1029[m[36m:[m        [1;31mframe[m["end_time"] = iso(end)
+[35mbackend/server.py[m[36m:[m[32m1030[m[36m:[m        [1;31mframe[m_start = datetime.fromisoformat([1;31mframe[m["start_time"])
+[35mbackend/server.py[m[36m:[m[32m1031[m[36m:[m        dur_sec = max( 0,(end - [1;31mframe[m_start).total_seconds() - paused_seconds)
+[35mbackend/server.py[m[36m:[m[32m1032[m[36m:[m        [1;31mframe[m["duration_minutes"] = int(dur_sec / 60)
+[35mbackend/server.py[m[36m:[m[32m1033[m[36m:[m        [1;31mframe[m["amount"] = round((dur_sec / 3600.0) * rate, 2)
+[35mbackend/server.py[m[36m:[m[32m1034[m[36m:[m        [1;31mframe[m["auto_closed"] = True
+[35mbackend/server.py[m[36m:[m[32m1035[m[36m:[m        [1;31mframe[ms.append([1;31mframe[m)
+[35mbackend/server.py[m[36m:[m[32m1037[m[36m:[m    # Table amount: sum of [1;31mframe[m amounts if any, else full duration × rate
+[35mbackend/server.py[m[36m:[m[32m1038[m[36m:[m    if [1;31mframe[ms:
+[35mbackend/server.py[m[36m:[m[32m1039[m[36m:[m        table_amount = round(sum(float(f.get("amount", 0)) for f in [1;31mframe[ms), 2)
+[35mbackend/server.py[m[36m:[m[32m1123[m[36m:[m# ---- [1;31mFrame[ms ----
+[35mbackend/server.py[m[36m:[m[32m1124[m[36m:[m@api.post("/sessions/{session_id}/[1;31mframe[ms/start")
+[35mbackend/server.py[m[36m:[m[32m1125[m[36m:[masync def start_[1;31mframe[m(session_id: str, body: [1;31mFrame[mStart, user=Depends(require_permission("manage_sessions"))):
+[35mbackend/server.py[m[36m:[m[32m1129[m[36m:[m    if s.get("current_[1;31mframe[m"):
+[35mbackend/server.py[m[36m:[m[32m1130[m[36m:[m        raise HTTPException(status_code=400, detail="A [1;31mframe[m is already running. End it first.")
+[35mbackend/server.py[m[36m:[m[32m1131[m[36m:[m    [1;31mframe[m_no = len(s.get("[1;31mframe[ms", [])) + 1
+[35mbackend/server.py[m[36m:[m[32m1132[m[36m:[m    [1;31mframe[m = {
+[35mbackend/server.py[m[36m:[m[32m1134[m[36m:[m        "[1;31mframe[m_number": [1;31mframe[m_no,
+[35mbackend/server.py[m[36m:[m[32m1145[m[36m:[m    await db.sessions.update_one({"id": session_id}, {"$set": {"current_[1;31mframe[m": [1;31mframe[m}})
+[35mbackend/server.py[m[36m:[m[32m1150[m[36m:[m@api.post("/sessions/{session_id}/[1;31mframe[ms/end")
+[35mbackend/server.py[m[36m:[m[32m1151[m[36m:[masync def end_[1;31mframe[m(session_id: str, body: [1;31mFrame[mEnd, user=Depends(require_permission("manage_sessions"))):
+[35mbackend/server.py[m[36m:[m[32m1155[m[36m:[m    [1;31mframe[m = s.get("current_[1;31mframe[m")
+[35mbackend/server.py[m[36m:[m[32m1156[m[36m:[m    if not [1;31mframe[m:
+[35mbackend/server.py[m[36m:[m[32m1157[m[36m:[m        raise HTTPException(status_code=400, detail="No active [1;31mframe[m. Start one first.")
+[35mbackend/server.py[m[36m:[m[32m1158[m[36m:[m    [1;31mframe[m["player_a"] = body.player_a
+[35mbackend/server.py[m[36m:[m[32m1159[m[36m:[m    [1;31mframe[m["player_b"] = body.player_b
+[35mbackend/server.py[m[36m:[m[32m1161[m[36m:[m    [1;31mframe[m["winner"] = body.winner or ""
+[35mbackend/server.py[m[36m:[m[32m1164[m[36m:[m        [1;31mframe[m["loser"] = body.player_b
+[35mbackend/server.py[m[36m:[m[32m1166[m[36m:[m        [1;31mframe[m["loser"] = body.player_a
+[35mbackend/server.py[m[36m:[m[32m1168[m[36m:[m        [1;31mframe[m["loser"] = ""
+[35mbackend/server.py[m[36m:[m[32m1170[m[36m:[m    [1;31mframe[m["paid_by"] = body.paid_by
+[35mbackend/server.py[m[36m:[m[32m1171[m[36m:[m    [1;31mframe[m["notes"] = body.notes or ""
+[35mbackend/server.py[m[36m:[m[32m1172[m[36m:[m    [1;31mframe[m["end_time"] = iso(now_utc())
+[35mbackend/server.py[m[36m:[m[32m1173[m[36m:[m    elapsed = (datetime.fromisoformat([1;31mframe[m["end_time"])- datetime.fromisoformat([1;31mframe[m["start_time"])).total_seconds()
+[35mbackend/server.py[m[36m:[m[32m1174[m[36m:[m    [1;31mframe[m_paused = [1;31mframe[m.get("paused_seconds", 0)
+[35mbackend/server.py[m[36m:[m[32m1176[m[36m:[m    # If the session is still paused when ending the [1;31mframe[m,
+[35mbackend/server.py[m[36m:[m[32m1180[m[36m:[m        [1;31mframe[m_paused += (now_utc() - pause_started).total_seconds()
+[35mbackend/server.py[m[36m:[m[32m1184[m[36m:[m        elapsed - [1;31mframe[m_paused)
+[35mbackend/server.py[m[36m:[m[32m1185[m[36m:[m    dur_sec = max( 0, elapsed - [1;31mframe[m.get("paused_seconds", 0))
+[35mbackend/server.py[m[36m:[m[32m1186[m[36m:[m    [1;31mframe[m["duration_minutes"] = int(dur_sec / 60)
+[35mbackend/server.py[m[36m:[m[32m1187[m[36m:[m    [1;31mframe[m["amount"] = round((dur_sec / 3600.0) * float(s.get("rate_used", 0)), 2)
+[35mbackend/server.py[m[36m:[m[32m1188[m[36m:[m    [1;31mframe[ms = s.get("[1;31mframe[ms", []) + [[1;31mframe[m]
+[35mbackend/server.py[m[36m:[m[32m1189[m[36m:[m    # Auto-start next [1;31mframe[m unless this is the final [1;31mframe[m
+[35mbackend/server.py[m[36m:[m[32m1190[m[36m:[m    next_[1;31mframe[m = {
+[35mbackend/server.py[m[36m:[m[32m1192[m[36m:[m        "[1;31mframe[m_number": [1;31mframe[m["[1;31mframe[m_number"] + 1,
+[35mbackend/server.py[m[36m:[m[32m1209[m[36m:[m                "[1;31mframe[ms": [1;31mframe[ms,
+[35mbackend/server.py[m[36m:[m[32m1210[m[36m:[m                "current_[1;31mframe[m": next_[1;31mframe[m,
+[35mbackend/server.py[m[36m:[m[32m1219[m[36m:[m@api.post("/sessions/{session_id}/[1;31mframe[ms/stop")
+[35mbackend/server.py[m[36m:[m[32m1220[m[36m:[masync def stop_[1;31mframe[m(session_id: str, user=Depends(require_permission("manage_sessions"))):
+[35mbackend/server.py[m[36m:[m[32m1221[m[36m:[m    """Cancel current [1;31mframe[m without a winner (rare)."""
+[35mbackend/server.py[m[36m:[m[32m1225[m[36m:[m    await db.sessions.update_one({"id": session_id}, {"$set": {"current_[1;31mframe[m": None}})
+[35mbackend/tests/backend_test.py[m[36m:[m[32m259[m[36m:[m# ---- FEATURE 2 & 3: [1;31mFrame[m amounts + Split payments ----
+[35mbackend/tests/backend_test.py[m[36m:[m[32m260[m[36m:[mclass Test[1;31mFrame[msAndSplitPayments:
+[35mbackend/tests/backend_test.py[m[36m:[m[32m265[m[36m:[m    def test_[1;31mframe[m_amounts_present(self, admin_token, staff_token):
+[35mbackend/tests/backend_test.py[m[36m:[m[32m268[m[36m:[m                          json={"table_id": t["id"], "customer_name": "TEST_[1;31mFrame[m"}, timeout=30)
+[35mbackend/tests/backend_test.py[m[36m:[m[32m272[m[36m:[m        # start & end [1;31mframe[m
+[35mbackend/tests/backend_test.py[m[36m:[m[32m273[m[36m:[m        requests.post(f"{API}/sessions/{sid}/[1;31mframe[ms/start", headers=auth(staff_token),
+[35mbackend/tests/backend_test.py[m[36m:[m[32m276[m[36m:[m        r2 = requests.post(f"{API}/sessions/{sid}/[1;31mframe[ms/end", headers=auth(staff_token),
+[35mbackend/tests/backend_test.py[m[36m:[m[32m279[m[36m:[m        [1;31mframe[ms = r2.json()["[1;31mframe[ms"]
+[35mbackend/tests/backend_test.py[m[36m:[m[32m280[m[36m:[m        assert len([1;31mframe[ms) >= 1
+[35mbackend/tests/backend_test.py[m[36m:[m[32m281[m[36m:[m        f = [1;31mframe[ms[0]
+[35mbackend/tests/backend_test.py[m[36m:[m[32m283[m[36m:[m            assert k in f, f"[1;31mframe[m missing {k}"
+[35mbackend/tests/backend_test.py[m[36m:[m[32m284[m[36m:[m        # amount uses precise elapsed [1;31mframe[m seconds, even though duration_minutes remains a display field.
+[35mbackend/tests/backend_test.py[m[36m:[m[32m298[m[36m:[m        # GET session must contain [1;31mframe[ms[] with amount
+[35mbackend/tests/backend_test.py[m[36m:[m[32m300[m[36m:[m        assert g["[1;31mframe[ms"] and "amount" in g["[1;31mframe[ms"][0]
+[35mbackend/tests/backend_test.py[m[36m:[m[32m592[m[36m:[m# ---- BUG FIX (iter 6): frontend split contract and precise [1;31mframe[m auto-close ----
+[35mbackend/tests/backend_test.py[m[36m:[m[32m593[m[36m:[mclass TestIteration6SplitAnd[1;31mFrame[mPrecision:
+[35mbackend/tests/backend_test.py[m[36m:[m[32m673[m[36m:[m    def test_auto_closed_running_[1;31mframe[m_uses_precise_seconds(self, admin_token, staff_token):
+[35mbackend/tests/backend_test.py[m[36m:[m[32m678[m[36m:[m        [1;31mframe[m_started = requests.post(
+[35mbackend/tests/backend_test.py[m[36m:[m[32m679[m[36m:[m            f"{API}/sessions/{sid}/[1;31mframe[ms/start",
+[35mbackend/tests/backend_test.py[m[36m:[m[32m684[m[36m:[m        assert [1;31mframe[m_started.status_code == 200, [1;31mframe[m_started.text
+[35mbackend/tests/backend_test.py[m[36m:[m[32m690[m[36m:[m        [1;31mframe[m = ended.json()["[1;31mframe[ms"][-1]
+[35mbackend/tests/backend_test.py[m[36m:[m[32m692[m[36m:[m            __import__("datetime").datetime.fromisoformat([1;31mframe[m["end_time"])
+[35mbackend/tests/backend_test.py[m[36m:[m[32m693[m[36m:[m            - __import__("datetime").datetime.fromisoformat([1;31mframe[m["start_time"])
+[35mbackend/tests/backend_test.py[m[36m:[m[32m697[m[36m:[m        assert [1;31mframe[m["auto_closed"] is True
+[35mbackend/tests/backend_test.py[m[36m:[m[32m698[m[36m:[m        assert [1;31mframe[m["amount"] == expected
+[35mbackend/tests/backend_test.py[m[36m:[m[32m699[m[36m:[m        assert [1;31mframe[m["amount"] > 0
+[35mbackend/tests/backend_test.py[m[36m:[m[32m700[m[36m:[m        assert [1;31mframe[m["amount"] != round(rate / 60.0, 2)
+[35mbackend/tests/backend_test.py[m[36m:[m[32m704[m[36m:[m# ---- ITERATION 7 edge cases: snapshot integrity and running-[1;31mframe[m consistency ----
+[35mbackend/tests/backend_test.py[m[36m:[m[32m739[m[36m:[m    def test_running_[1;31mframe[m_closes_at_snapshot_time(self, admin_token, staff_token):
+[35mbackend/tests/backend_test.py[m[36m:[m[32m740[m[36m:[m        started = self._start(admin_token, staff_token, "TEST_Iter7[1;31mFrame[mSnapshot")
+[35mbackend/tests/backend_test.py[m[36m:[m[32m742[m[36m:[m        [1;31mframe[m_started = requests.post(
+[35mbackend/tests/backend_test.py[m[36m:[m[32m743[m[36m:[m            f"{API}/sessions/{sid}/[1;31mframe[ms/start",
+[35mbackend/tests/backend_test.py[m[36m:[m[32m748[m[36m:[m        assert [1;31mframe[m_started.status_code == 200, [1;31mframe[m_started.text
+[35mbackend/tests/backend_test.py[m[36m:[m[32m764[m[36m:[m        [1;31mframe[m = invoice["[1;31mframe[ms"][-1]
+[35mbackend/tests/backend_test.py[m[36m:[m[32m766[m[36m:[m        assert [1;31mframe[m["end_time"] == snapshot["end_time"], (
+[35mbackend/tests/backend_test.py[m[36m:[m[32m767[m[36m:[m            "Auto-closed [1;31mframe[m must end at the frozen billing timestamp so its itemized amount "
+[35mbackend/tests/backend_test.py[m[36m:[m[32m770[m[36m:[m        assert round(sum(float(item["amount"]) for item in invoice["[1;31mframe[ms"]), 2) == invoice["table_amount"]
+[35mfrontend/package-lock.json[m[36m:[m[32m104[m[36m:[m    "node_modules/@babel/code-[1;31mframe[m": {
+[35mfrontend/package-lock.json[m[36m:[m[32m106[m[36m:[m      "resolved": "https://registry.npmjs.org/@babel/code-[1;31mframe[m/-/code-[1;31mframe[m-7.29.7.tgz",
+[35mfrontend/package-lock.json[m[36m:[m[32m133[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.29.7",
+[35mfrontend/package-lock.json[m[36m:[m[32m2089[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.29.7",
+[35mfrontend/package-lock.json[m[36m:[m[32m2103[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.29.7",
+[35mfrontend/package-lock.json[m[36m:[m[32m8712[m[36m:[m        "stack[1;31mframe[m": "^1.3.4"
+[35mfrontend/package-lock.json[m[36m:[m[32m10134[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.8.3",
+[35mfrontend/package-lock.json[m[36m:[m[32m12228[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.12.13",
+[35mfrontend/package-lock.json[m[36m:[m[32m12591[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.12.13",
+[35mfrontend/package-lock.json[m[36m:[m[32m13998[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.0.0",
+[35mfrontend/package-lock.json[m[36m:[m[32m15842[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.16.0",
+[35mfrontend/package-lock.json[m[36m:[m[32m16659[m[36m:[m        "@babel/code-[1;31mframe[m": "^7.10.4",
+[35mfrontend/package-lock.json[m[36m:[m[32m17381[m[36m:[m    "node_modules/stack[1;31mframe[m": {
+[35mfrontend/package-lock.json[m[36m:[m[32m17383[m[36m:[m      "resolved": "https://registry.npmjs.org/stack[1;31mframe[m/-/stack[1;31mframe[m-1.3.4.tgz",
+[35mfrontend/public/index.html[m[36m:[m[32m107[m[36m:[m                    recordCrossOriginI[1;31mframe[ms: true,
