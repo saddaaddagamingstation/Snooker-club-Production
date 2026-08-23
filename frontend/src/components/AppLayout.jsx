@@ -1,6 +1,6 @@
 import { Outlet, NavLink, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { LayoutDashboard, Grid3x3,Timer, UtensilsCrossed, ClipboardList, BarChart3, Users, LogOut, Circle, Menu, X, Wallet,} from "lucide-react";
+import { LayoutDashboard, Grid3x3,Timer, UtensilsCrossed, ClipboardList, BarChart3, Users, LogOut, Menu, X, Wallet,} from "lucide-react";
 import { useState, useEffect } from "react";
 import api from "@/lib/api";
 import NotificationBell from "@/components/NotificationBell";
@@ -99,13 +99,13 @@ export default function AppLayout() {
           aria-label="Cue Ops - Go to dashboard"
           className="p-4 flex items-center gap-3 border-b border-[#1c1c1c] cursor-pointer hover:bg-[#111111] transition-colors"
         >
-          <div className="relative w-9 h-9 rounded-full bg-gradient-to-br from-green-700 to-green-900 flex items-center justify-center shadow-[0_0_18px_rgba(21,128,61,0.4)] shrink-0">
-            <Circle
-              aria-hidden="true"
-              className="w-4 h-4 text-white fill-white/20"
-              strokeWidth={2.5}
-            />
-          </div>
+          <div className="relative w-9 h-9 rounded-full bg-white flex items-center justify-center shadow-[0_0_18px_rgba(21,128,61,0.4)] shrink-0">
+  <img
+    src="logo.png"
+    alt="Cue Ops"
+    className="w-7 h-7 object-contain"
+  />
+</div>
 
           <div className="min-w-0">
             <div className="text-[25px] uppercase tracking-[0.05em] text-white font-bold">
