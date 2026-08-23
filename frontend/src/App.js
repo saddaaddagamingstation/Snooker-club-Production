@@ -8,6 +8,7 @@ import Dashboard from "@/pages/Dashboard";
 import Tables from "@/pages/Tables";
 import Sessions from "@/pages/Sessions";
 import Snacks from "@/pages/Snacks";
+import FoodOrders from "@/pages/FoodOrders";
 import Reports from "@/pages/Reports";
 import Expenses from "@/pages/Expenses";
 import Staff from "@/pages/Staff";
@@ -39,6 +40,7 @@ export default function App() {
             <Route path="/expenses" element={<Protected perm="view_expenses"><Expenses /></Protected>} />
             <Route path="/staff" element={<Protected perm="manage_users"><Staff /></Protected>} />
             <Route path="/bill/:id" element={<Bill />} />
+            <Route path="/food-orders" element={<FoodOrders />} />
           </Route>
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

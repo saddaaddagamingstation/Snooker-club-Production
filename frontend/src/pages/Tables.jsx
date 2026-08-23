@@ -3,7 +3,7 @@ import api, { inr, formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { Plus, Search, Pencil, Trash2, Circle, X, Clock, Play } from "lucide-react";
 import { toast } from "sonner";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 const STATUS_STYLES = {
   available: "bg-green-500/10 text-green-400 border-green-500/30",
@@ -36,6 +36,8 @@ export default function Tables() {
   const [sessions, setSessions] = useState([]);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
+  const [searchParams] = useSearchParams();
+  const foodOrderId = searchParams.get("food_order");
   const [modal, setModal] = useState(null); // {edit?, form}
   const [startModal, setStartModal] = useState(null); // table object
   useTimer();
@@ -74,12 +76,44 @@ export default function Tables() {
   };
 
   const startSession = async (form) => {
-    try {
-      const { data } = await api.post("/sessions/start", { table_id: startModal.id, customer_name: form.customer_name, notes: form.notes });
-      toast.success(`Session started on ${data.table_number}`);
-      setStartModal(null); navigate("/sessions");
-    } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
-  };
+  try {
+    let data;
+
+    if (foodOrderId) {
+      const response = await api.post(
+        `/food-orders/${foodOrderId}/start-table`,
+        {
+          table_id: startModal.id
+        }
+      );
+
+      data = response.data;
+
+      toast.success(
+        `Table ${data.table_number} started with food order`
+      );
+    } else {
+      const response = await api.post("/sessions/start", {
+        table_id: startModal.id,
+        customer_name: form.customer_name,
+        notes: form.notes
+      });
+
+      data = response.data;
+
+      toast.success(
+        `Session started on ${data.table_number}`
+      );
+    }
+
+    setStartModal(null);
+    navigate("/sessions");
+  } catch (e) {
+    toast.error(
+      formatApiErrorDetail(e.response?.data?.detail)
+    );
+  }
+};
 
   return (
     <div className="space-y-6" data-testid="tables-page">
@@ -112,7 +146,28 @@ export default function Tables() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-        {filtered.map((t) => {
+  {filtered.length === 0 ? (
+    <div className="col-span-full min-h-[280px] flex flex-col items-center justify-center text-center">
+      <div className="w-16 h-16 rounded-2xl bg-[#141414] border border-[#262626] flex items-center justify-center mb-4">
+        <Circle className="w-7 h-7 text-gray-600" />
+      </div>
+
+      <div className="text-lg font-semibold text-gray-300">
+        {search
+          ? "No Tables Found"
+          : filter === "all"
+          ? "No Tables"
+          : `No ${filter.charAt(0).toUpperCase() + filter.slice(1)} Tables`}
+      </div>
+
+      <div className="text-sm text-gray-500 mt-2">
+        {search
+          ? "Try a different search."
+          : `There are currently no tables in ${filter === "all" ? "the club" : `this category`}.`}
+      </div>
+    </div>
+  ) : (
+    filtered.map((t) => {
           const active = sessionFor(t.id);
           return (
             <div key={t.id} data-testid={`table-card-${t.table_number}`}
@@ -156,7 +211,8 @@ export default function Tables() {
               </div>
             </div>
           );
-        })}
+        })
+        )}
       </div>
 
       {modal && (
@@ -165,10 +221,17 @@ export default function Tables() {
         </Modal>
       )}
       {startModal && (
-        <Modal title={`Start session on ${startModal.table_number}`} onClose={() => setStartModal(null)}>
-          <StartSessionForm table={startModal} onSubmit={startSession} />
-        </Modal>
-      )}
+  <Modal
+    title={`Start session on ${startModal.table_number}`}
+    onClose={() => setStartModal(null)}
+  >
+    <StartSessionForm
+      table={startModal}
+      onSubmit={startSession}
+      foodOrderId={foodOrderId}
+    />
+  </Modal>
+)}
     </div>
   );
 }
@@ -211,7 +274,7 @@ function TableForm({ initial, onSubmit }) {
   );
 }
 
-function StartSessionForm({ table, onSubmit }) {
+function StartSessionForm({ table, onSubmit, foodOrderId }) {
   const [f, setF] = useState({ customer_name: "", notes: "" });
   return (
     <form onSubmit={(e) => { e.preventDefault(); onSubmit(f); }} className="space-y-4" data-testid="start-session-form">

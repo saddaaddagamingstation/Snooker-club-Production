@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import api, { inr } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import { IndianRupee, Activity, Layers, CircleDot, UtensilsCrossed, ClipboardCheck, TrendingUp, Coffee, Trophy } from "lucide-react";
+import { IndianRupee, Activity, Layers, CircleDot, UtensilsCrossed, ClipboardCheck, TrendingUp, Coffee, Trophy, Play } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, AreaChart, Area, PieChart, Pie, Cell, Legend } from "recharts";
 import { Link } from "react-router-dom";
+import AddFoodModal from "@/components/AddFoodModal";
+
 
 const COLORS = ["#15803d", "#f59e0b", "#3b82f6", "#a855f7", "#ef4444"];
 
@@ -69,6 +71,7 @@ export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [charts, setCharts] = useState(null);
   const [recent, setRecent] = useState({ sessions: [], bills: [] });
+  const [showAddFood, setShowAddFood] = useState(false);
   const showRevenue = can("view_revenue");
 
   const load = async () => {
@@ -85,13 +88,37 @@ export default function Dashboard() {
     <div className="space-y-8" data-testid="dashboard-page">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <div className="text-xs uppercase tracking-[0.25em] text-green-500 font-bold mb-2">Control Room</div>
           <h1 className="text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight">Today's Performance</h1>
           <p className="text-gray-400 mt-2">Live snapshot of your club. Auto-refreshes every 15s.</p>
         </div>
-        <Link to="/sessions" className="px-5 h-12 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-2 transition-all" data-testid="quick-start-session-btn">
-          <Activity className="w-4 h-4" /> Manage Sessions
-        </Link>
+        <div className="flex items-center gap-3">
+  <button
+  onClick={() => setShowAddFood(true)}
+  className="px-5 h-12 rounded-xl border border-[#333] bg-[#141414] hover:bg-[#1c1c1c] text-white font-semibold flex items-center gap-2 transition-all"
+  data-testid="add-food-btn"
+>
+  <UtensilsCrossed className="w-4 h-4" />
+  Add Food
+</button>
+
+  <Link
+    to="/tables"
+    className="px-5 h-12 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-2 transition-all"
+    data-testid="quick-start-table-btn"
+  >
+    <Play className="w-4 h-4" />
+    Start Table
+  </Link>
+
+  <Link
+    to="/sessions"
+    className="px-5 h-12 rounded-xl border border-[#333] bg-[#141414] hover:bg-[#1c1c1c] text-white font-semibold flex items-center gap-2 transition-all"
+    data-testid="view-sessions-btn"
+  >
+    <Activity className="w-4 h-4" />
+    View Sessions
+  </Link>
+</div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[2fr_1fr_1fr] gap-6 auto-rows-fr">
@@ -200,6 +227,11 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+
+      <AddFoodModal
+        open={showAddFood}
+        onClose={() => setShowAddFood(false)}
+      />
     </div>
   );
 }

@@ -1,5 +1,6 @@
 from dotenv import load_dotenv
 from pathlib import Path
+from typing import Literal
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
@@ -25,9 +26,9 @@ db = client[os.environ['DB_NAME']]
 
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALG = "HS256"
-CLUB_NAME = os.environ.get('CLUB_NAME', 'Snooker Club')
+CLUB_NAME = os.environ.get('CLUB_NAME', 'Supreme Snooker Club')
 
-app = FastAPI(title="Snooker Club API")
+app = FastAPI(title="Supreme Snooker Club API")
 api = APIRouter(prefix="/api")
 security = HTTPBearer(auto_error=False)
 
@@ -104,6 +105,16 @@ class SessionStart(BaseModel):
 class SnackOrderItem(BaseModel):
     snack_id: str
     quantity: int
+
+class FoodOrderCreate(BaseModel):
+    customer_name: Optional[str] = ""
+    items: List[SnackOrderItem]
+    status: Literal["pending", "completed"] = "pending"
+    discount: float = 0
+    payment_method: Optional[str] = None
+
+class FoodOrderAttach(BaseModel):
+    table_id: str
 
 class FreezeSnapshot(BaseModel):
     end_time: str
@@ -500,11 +511,441 @@ async def delete_snack(snack_id: str, user=Depends(require_permission("manage_sn
     return {"deleted": res.deleted_count}
 
 # ---- Sessions ----
+
+@api.post("/food-orders")
+async def create_food_order(
+    body: FoodOrderCreate,
+    user=Depends(require_permission("manage_sessions"))
+):
+    if not body.items:
+        raise HTTPException(status_code=400, detail="At least one item is required")
+
+    order_items = []
+    total = 0.0
+
+    for requested_item in body.items:
+        if requested_item.quantity <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Quantity must be positive"
+            )
+
+        snack = await db.snacks.find_one(
+            {"id": requested_item.snack_id},
+            {"_id": 0}
+        )
+
+        if not snack:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Snack not found: {requested_item.snack_id}"
+            )
+
+        stock = int(snack.get("stock_quantity", 0))
+
+        if stock <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{snack['name']} is out of stock"
+            )
+
+        if requested_item.quantity > stock:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only {stock} item(s) of {snack['name']} available"
+            )
+
+        price = float(snack["price"])
+        subtotal = price * requested_item.quantity
+
+        order_items.append({
+            "snack_id": snack["id"],
+            "name": snack["name"],
+            "price": price,
+            "quantity": requested_item.quantity,
+            "subtotal": subtotal,
+        })
+
+        total += subtotal
+
+    # Deduct stock
+    for item in order_items:
+        await db.snacks.update_one(
+            {"id": item["snack_id"]},
+            {"$inc": {"stock_quantity": -item["quantity"]}}
+        )
+
+    discount = max(0, min(float(body.discount or 0), total))
+    final_total = round(total - discount, 2)
+
+    order = {
+        "id": str(uuid.uuid4()),
+        "customer_name": (body.customer_name or "").strip(),
+        "items": order_items,
+        "total": round(total, 2),
+        "discount": round(discount, 2),
+        "final_total": final_total,
+        "payment_method": body.payment_method,
+        "status": body.status,
+        "session_id": None,
+        "created_at": iso(now_utc()),
+        "paid_at": iso(now_utc()) if body.status == "completed" else None,
+        "created_by": user["id"],
+        "created_by_name": user.get("name", ""),}
+
+
+    await db.food_orders.insert_one(order.copy())
+
+    order.pop("_id", None)
+    return order
+
 async def _session_with_details(s):
     table = await db.tables.find_one({"id": s["table_id"]}, {"_id": 0})
     s["table"] = table
     s["snacks_total"] = sum(item.get("subtotal", 0) for item in s.get("snacks", []))
     return s
+
+@api.get("/food-orders/pending")
+async def list_pending_food_orders(
+    user=Depends(require_permission("manage_sessions"))
+):
+    orders = await db.food_orders.find(
+        {"status": "pending"},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(200)
+
+    return orders
+
+@api.get("/food-orders/{order_id}")
+async def get_food_order(
+    order_id: str,
+    user=Depends(require_permission("manage_sessions"))
+):
+    order = await db.food_orders.find_one(
+        {"id": order_id},
+        {"_id": 0}
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Food order not found"
+        )
+
+    return order
+
+@api.post("/food-orders/{order_id}/complete")
+async def complete_food_order(
+    order_id: str,
+    body: dict,
+    user=Depends(require_permission("manage_sessions"))
+):
+    order = await db.food_orders.find_one(
+        {"id": order_id},
+        {"_id": 0}
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Food order not found"
+        )
+
+    if order.get("status") != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Food order is already {order.get('status')}"
+        )
+
+    subtotal = float(order.get("total", 0))
+    discount = max(
+        0,
+        min(float(body.get("discount", 0) or 0), subtotal)
+    )
+
+    final_total = round(subtotal - discount, 2)
+
+    payment_method = (
+        body.get("payment_method")
+        or "Cash"
+    )
+
+    await db.food_orders.update_one(
+        {"id": order_id},
+        {
+            "$set": {
+                "status": "completed",
+                "discount": round(discount, 2),
+                "final_total": final_total,
+                "payment_method": payment_method,
+                "paid_at": iso(now_utc()),
+                "completed_by": user["id"],
+                "completed_by_name": user.get("name", ""),
+            }
+        }
+    )
+
+    updated_order = await db.food_orders.find_one(
+        {"id": order_id},
+        {"_id": 0}
+    )
+
+    return updated_order
+
+@api.delete("/food-orders/{order_id}")
+async def cancel_food_order(
+    order_id: str,
+    user=Depends(require_permission("manage_sessions"))
+):
+    order = await db.food_orders.find_one(
+        {"id": order_id},
+        {"_id": 0}
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Food order not found"
+        )
+
+    if order.get("status") != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail="Only pending food orders can be cancelled"
+        )
+
+    # Restore inventory
+    for item in order.get("items", []):
+        quantity = int(item.get("quantity", 0))
+
+        if quantity > 0:
+            await db.snacks.update_one(
+                {"id": item["snack_id"]},
+                {"$inc": {"stock_quantity": quantity}}
+            )
+
+    # Mark order as cancelled
+    await db.food_orders.update_one(
+        {"id": order_id},
+        {
+            "$set": {
+                "status": "cancelled",
+                "cancelled_at": iso(now_utc()),
+                "cancelled_by": user["id"],
+                "cancelled_by_name": user.get("name", ""),
+            }
+        }
+    )
+
+    return {
+        "ok": True,
+        "message": "Food order cancelled",
+        "order_id": order_id
+    }
+
+@api.post("/food-orders/{order_id}/attach")
+async def attach_food_order(
+    order_id: str,
+    session_id: str = Query(...),
+    user=Depends(require_permission("manage_sessions"))
+):
+    order = await db.food_orders.find_one(
+        {"id": order_id},
+        {"_id": 0}
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Food order not found"
+        )
+
+    if order.get("status") != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail="Only pending food orders can be attached"
+        )
+
+    session = await db.sessions.find_one(
+        {"id": session_id},
+        {"_id": 0}
+    )
+
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail="Session not found"
+        )
+
+    if session.get("status") != "active":
+        raise HTTPException(
+            status_code=400,
+            detail="Session is not active"
+        )
+
+    existing_snacks = session.get("snacks", [])
+    order_items = order.get("items", [])
+
+    for item in order_items:
+        existing_snacks.append({
+            "snack_id": item["snack_id"],
+            "name": item["name"],
+            "price": item["price"],
+            "quantity": item["quantity"],
+            "subtotal": item["subtotal"],
+            "added_at": order.get("created_at", iso(now_utc())),
+            "source": "pre_table_order",
+            "food_order_id": order_id,
+        })
+
+    snacks_amount = sum(
+        float(item.get("subtotal", 0))
+        for item in existing_snacks
+    )
+
+    await db.sessions.update_one(
+        {"id": session_id},
+        {
+            "$set": {
+                "snacks": existing_snacks,
+                "snacks_amount": round(snacks_amount, 2),
+            }
+        }
+    )
+
+    await db.food_orders.update_one(
+        {"id": order_id},
+        {
+            "$set": {
+                "status": "attached",
+                "session_id": session_id,
+                "attached_at": iso(now_utc()),
+                "attached_by": user["id"],
+                "attached_by_name": user.get("name", ""),
+            }
+        }
+    )
+
+    updated_session = await db.sessions.find_one(
+        {"id": session_id},
+        {"_id": 0}
+    )
+
+    await _session_with_details(updated_session)
+
+    return {
+        "ok": True,
+        "message": "Food order attached successfully",
+        "order_id": order_id,
+        "session": updated_session,
+    }
+
+@api.post("/food-orders/{order_id}/start-table")
+async def start_table_from_food_order(
+    order_id: str,
+    body: FoodOrderAttach,
+    user=Depends(require_permission("manage_sessions"))
+):
+    # 1. Find the food order
+    order = await db.food_orders.find_one(
+        {"id": order_id},
+        {"_id": 0}
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Food order not found"
+        )
+
+    # 2. Only pending orders can start a table
+    if order.get("status") != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Food order is already {order.get('status')}"
+        )
+
+    # 3. Verify table exists and is available
+    table = await db.tables.find_one(
+        {"id": body.table_id},
+        {"_id": 0}
+    )
+
+    if not table:
+        raise HTTPException(
+            status_code=404,
+            detail="Table not found"
+        )
+
+    if table["status"] != "available":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Table is {table['status']}"
+        )
+
+    # 4. Start a normal session
+    session = await start_session(
+        SessionStart(
+            table_id=body.table_id,
+            customer_name=order.get("customer_name", ""),
+            notes=""
+        ),
+        user
+    )
+
+    # 5. Convert food-order items into session snacks
+    snacks = []
+
+    for item in order.get("items", []):
+        snacks.append({
+            "snack_id": item["snack_id"],
+            "name": item["name"],
+            "price": float(item["price"]),
+            "quantity": int(item["quantity"]),
+            "subtotal": float(item["subtotal"]),
+        })
+
+    snacks_amount = round(
+        sum(item["subtotal"] for item in snacks),
+        2
+    )
+
+    # 6. Attach snacks to the newly-created session
+    await db.sessions.update_one(
+        {"id": session["id"]},
+        {
+            "$set": {
+                "snacks": snacks,
+                "snacks_amount": snacks_amount
+            }
+        }
+    )
+
+    # 7. Mark food order as attached
+    await db.food_orders.update_one(
+        {"id": order_id},
+        {
+            "$set": {
+                "status": "attached",
+                "session_id": session["id"],
+                "attached_at": iso(now_utc()),
+                "attached_by": user["id"],
+                "attached_by_name": user.get("name", ""),
+                "table_id": table["id"],
+                "table_number": table["table_number"]
+            }
+        }
+    )
+
+    # 8. Return updated session
+    updated_session = await db.sessions.find_one(
+        {"id": session["id"]},
+        {"_id": 0}
+    )
+
+    await _session_with_details(updated_session)
+
+    return updated_session
 
 @api.get("/sessions")
 async def list_sessions(status: Optional[str] = None, user=Depends(get_current_user)):
@@ -1289,8 +1730,47 @@ async def dashboard_stats(user=Depends(get_current_user)):
     completed_today = await db.sessions.find(
         {"status": "completed", "ended_at": {"$gte": iso(today_start)}}, {"_id": 0}
     ).to_list(1000)
-    today_revenue = round(sum(s.get("grand_total", 0) for s in completed_today), 2)
-    today_snacks_revenue = round(sum(s.get("snacks_amount", 0) for s in completed_today), 2)
+    table_revenue_today = round(sum(
+        float(s.get("grand_total", 0))
+        for s in completed_today
+    ),
+    2
+)
+    food_orders_today = await db.food_orders.find(
+        {
+            "status": "completed",
+            "paid_at": {
+                "$gte": iso(today_start)
+            }
+        },
+        {"_id": 0}
+    ).to_list(1000)
+
+    food_only_snacks_revenue = round(
+        sum(
+            float(
+                o.get(
+                    "final_total",
+                    o.get("total", 0)
+                )
+            )
+            for o in food_orders_today
+        ),
+        2
+    )
+
+    today_revenue = round(
+    table_revenue_today + food_only_snacks_revenue,
+    2
+)
+
+    today_snacks_revenue = round(
+        sum(
+            float(s.get("snacks_amount", 0))
+            for s in completed_today
+        ) + food_only_snacks_revenue,
+        2
+    )
     today_sessions = len(completed_today) + active
     return {
         "today_revenue": today_revenue,
@@ -1363,12 +1843,65 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
         d_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         d_end = now
     sessions = await db.sessions.find(
-        {"status": "completed", "ended_at": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+    {
+        "status": "completed",
+        "ended_at": {
+            "$gte": iso(d_start),
+            "$lte": iso(d_end)
+        }
+    },
+    {"_id": 0}
+        ).to_list(5000)
+
+    # Food-only sales
+    food_orders = await db.food_orders.find(
+        {
+            "status": "completed",
+            "paid_at": {
+                "$gte": iso(d_start),
+                "$lte": iso(d_end)
+            }
+        },
+        {"_id": 0}
     ).to_list(5000)
+
     total_sessions = len(sessions)
-    total_revenue = round(sum(s.get("grand_total", 0) for s in sessions), 2)
-    snack_revenue = round(sum(s.get("snacks_amount", 0) for s in sessions), 2)
-    table_revenue = round(sum(s.get("table_amount", 0) for s in sessions), 2)
+
+    # Table/session revenue
+    table_revenue = round(
+        sum(float(s.get("table_amount", 0)) for s in sessions),
+        2
+    )
+
+    # Snacks attached to table sessions
+    session_snack_revenue = round(
+        sum(float(s.get("snacks_amount", 0)) for s in sessions),
+        2
+    )
+
+    # Food-only revenue
+    food_only_revenue = round(
+        sum(float(o.get("final_total", o.get("total", 0))) for o in food_orders),
+        2
+    )
+
+    # Combined snack revenue
+    snack_revenue = round(
+        session_snack_revenue + food_only_revenue,
+        2
+    )
+
+    # Total revenue
+    total_revenue = round(
+        sum(float(s.get("grand_total", 0)) for s in sessions)
+        + food_only_revenue,
+        2
+    )
+
+    avg_duration = round(
+        sum(s.get("duration_minutes", 0) for s in sessions) / total_sessions,
+        1
+    ) if total_sessions else 0
     avg_duration = round(sum(s.get("duration_minutes", 0) for s in sessions) / total_sessions, 1) if total_sessions else 0
     # best tables
     table_totals = {}
@@ -1376,30 +1909,168 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
         k = s.get("table_number", "?")
         table_totals[k] = table_totals.get(k, 0) + s.get("grand_total", 0)
     best_tables = sorted([{"table": k, "revenue": round(v, 2)} for k, v in table_totals.items()], key=lambda x: -x["revenue"])[:5]
-    # best snacks
+        # Best snacks
     snack_totals = {}
+
+    # Snacks sold with table sessions
     for s in sessions:
         for item in s.get("snacks", []):
             n = item["name"]
-            snack_totals[n] = snack_totals.get(n, {"qty": 0, "revenue": 0})
-            snack_totals[n]["qty"] += item["quantity"]
-            snack_totals[n]["revenue"] += item["subtotal"]
+
+            snack_totals[n] = snack_totals.get(
+                n,
+                {"qty": 0, "revenue": 0}
+            )
+
+            snack_totals[n]["qty"] += int(
+                item.get("quantity", 0)
+            )
+
+            snack_totals[n]["revenue"] += float(
+                item.get("subtotal", 0)
+            )
+
+        # Food-only snacks
+    for order in food_orders:
+        for item in order.get("items", []):
+            n = item["name"]
+
+            snack_totals[n] = snack_totals.get(
+                n,
+                {"qty": 0, "revenue": 0}
+            )
+
+            snack_totals[n]["qty"] += int(
+                item.get("quantity", 0)
+            )
+
+            snack_totals[n]["revenue"] += float(
+                item.get("subtotal", 0)
+            )
+
+    # Best snacks
     best_snacks = sorted(
-        [{"name": n, **v, "revenue": round(v["revenue"], 2)} for n, v in snack_totals.items()],
+        [
+            {
+                "name": n,
+                **v,
+                "revenue": round(v["revenue"], 2)
+            }
+            for n, v in snack_totals.items()
+        ],
         key=lambda x: -x["qty"],
     )[:5]
-    customers = len({s.get("customer_name") for s in sessions if s.get("customer_name")})
+
+
+    # Detailed snack sales
+    snack_details = []
+
+    # Table sessions
+    for s in sessions:
+        snacks = s.get("snacks", [])
+
+        if not snacks:
+            continue
+
+        snack_list = []
+        total_qty = 0
+        total_revenue = 0
+
+        for item in snacks:
+            quantity = int(item.get("quantity", 0))
+            revenue = float(item.get("subtotal", 0))
+
+            snack_list.append({
+                "name": item.get("name", ""),
+                "quantity": quantity,
+            })
+
+            total_qty += quantity
+            total_revenue += revenue
+
+        snack_details.append({
+            "source": "table",
+            "table_number": s.get("table_number", "?"),
+            "customer_name": s.get("customer_name", ""),
+            "snacks": snack_list,
+            "total_qty": total_qty,
+            "revenue": round(total_revenue, 2),
+            "sold_at": s.get(
+                "ended_at",
+                s.get("start_time", "")
+            ),
+        })
+
+
+    # Food Only orders
+    for order in food_orders:
+        items = order.get("items", [])
+
+        if not items:
+            continue
+
+        snack_list = []
+        total_qty = 0
+        total_revenue = 0
+
+        for item in items:
+            quantity = int(item.get("quantity", 0))
+            revenue = float(item.get("subtotal", 0))
+
+            snack_list.append({
+                "name": item.get("name", ""),
+                "quantity": quantity,
+            })
+
+            total_qty += quantity
+            total_revenue += revenue
+
+        snack_details.append({
+            "source": "food_only",
+            "table_number": "Food Only",
+            "customer_name": order.get("customer_name", ""),
+            "snacks": snack_list,
+            "total_qty": total_qty,
+            "revenue": round(total_revenue, 2),
+            "sold_at": order.get(
+                "paid_at",
+                order.get("created_at", "")
+            ),
+        })
+
+
+    # Sort all snack sales
+    snack_details.sort(
+        key=lambda x: x.get("sold_at", ""),
+        reverse=True
+    )
+
+
+    # Count customers
+    customers = len({
+        name.strip().lower()
+        for name in (
+            [s.get("customer_name", "") for s in sessions]
+            + [o.get("customer_name", "") for o in food_orders]
+        )
+        if name and name.strip()
+    })
+
+
     return {
         "period": period,
         "start": iso(d_start),
         "end": iso(d_end),
         "total_sessions": total_sessions,
         "total_revenue": total_revenue,
-        "snack_revenue": snack_revenue,
         "table_revenue": table_revenue,
+        "snack_revenue": snack_revenue,
+        "food_only_revenue": food_only_revenue,
+        "food_only_orders": len(food_orders),
         "avg_duration_min": avg_duration,
         "best_tables": best_tables,
         "best_snacks": best_snacks,
+        "snack_details": snack_details,
         "total_customers": customers,
         "sessions": sessions,
     }
@@ -1620,7 +2291,39 @@ async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, 
     ).to_list(10000)
     table_revenue = round(sum(s.get("table_amount", 0) for s in sessions), 2)
     snack_revenue = round(sum(s.get("snacks_amount", 0) for s in sessions), 2)
-    gross_revenue = round(sum(s.get("grand_total", 0) for s in sessions), 2)
+    food_orders = await db.food_orders.find(
+        {
+            "status": "completed",
+            "paid_at": {
+                "$gte": iso(d_start),
+                "$lte": iso(d_end)
+            }
+        },
+        {"_id": 0}
+    ).to_list(10000)
+
+    table_revenue = round(
+        sum(float(s.get("grand_total", 0)) for s in sessions),
+        2
+    )
+
+    food_only_revenue = round(
+        sum(
+            float(
+                o.get(
+                    "final_total",
+                    o.get("total", 0)
+                )
+            )
+            for o in food_orders
+        ),
+        2
+    )
+
+    gross_revenue = round(
+        table_revenue + food_only_revenue,
+        2
+    )
     # Expenses in range
     exps = await db.expenses.find(
         {"date": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
@@ -1674,6 +2377,8 @@ async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, 
         "period": period,
         "start": iso(d_start), "end": iso(d_end),
         "table_revenue": table_revenue,
+        "food_only_revenue": food_only_revenue,
+        "food_only_orders": len(food_orders),
         "snack_revenue": snack_revenue,
         "other_income": 0.0,
         "gross_revenue": gross_revenue,
@@ -1735,28 +2440,99 @@ async def report_expenses(period: str = "monthly", start: Optional[str] = None, 
     }
 
 @api.get("/reports/payments")
-async def report_payments(period: str = "monthly", start: Optional[str] = None, end: Optional[str] = None, user=Depends(require_permission("view_revenue"))):
+async def report_payments(
+    period: str = "monthly",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    user=Depends(require_permission("view_revenue"))
+):
     d_start, d_end = _period_range(period, start, end)
+
     payments = await db.payments.find(
-        {"created_at": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+        {
+            "created_at": {
+                "$gte": iso(d_start),
+                "$lte": iso(d_end)
+            }
+        },
+        {"_id": 0}
     ).sort("created_at", -1).to_list(10000)
-    by_method = {m: 0.0 for m in PAYMENT_METHODS}
+
+    # Include Food Only payments
+    food_orders = await db.food_orders.find(
+        {
+            "status": "completed",
+            "paid_at": {
+                "$gte": iso(d_start),
+                "$lte": iso(d_end)
+            }
+        },
+        {"_id": 0}
+    ).sort("paid_at", -1).to_list(10000)
+
+    # Add Food Only payments
+    for order in food_orders:
+        payments.append(
+            {
+                "id": f"food-{order['id']}",
+                "food_order_id": order["id"],
+                "invoice_no": f"FOOD-{order['id'][:6].upper()}",
+                "amount": float(
+                    order.get(
+                        "final_total",
+                        order.get("total", 0)
+                    )
+                ),
+                "method": (
+                    order.get("payment_method")
+                    or "cash"
+                ).lower(),
+                "table_number": "Food Only",
+                "customer_name": order.get(
+                    "customer_name",
+                    ""
+                ),
+                "created_at": order.get(
+                    "paid_at",
+                    order.get("created_at")
+                ),
+            }
+        )
+
+    # Calculate payment totals
+    by_method = {
+        m: 0.0 for m in PAYMENT_METHODS
+    }
+
     for p in payments:
-        by_method[p.get("method", "cash")] = by_method.get(p.get("method", "cash"), 0) + float(p.get("amount", 0))
-    method_totals = [{"method": m, "amount": round(v, 2)} for m, v in by_method.items()]
-    # Daily (last 14 days)
-    daily = []
-    for i in range(13, -1, -1):
-        d = (now_utc() - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
-        d_e = d + timedelta(days=1)
-        rows = await db.payments.find({"created_at": {"$gte": iso(d), "$lt": iso(d_e)}}, {"_id": 0}).to_list(5000)
-        daily.append({"date": d.strftime("%d %b"), "amount": round(sum(x.get("amount", 0) for x in rows), 2)})
+        method = (
+            p.get("method") or "cash"
+        ).lower()
+
+        if method not in by_method:
+            by_method[method] = 0.0
+
+        by_method[method] += float(
+            p.get("amount", 0)
+        )
+
+    total = round(
+        sum(
+            float(p.get("amount", 0))
+            for p in payments
+        ),
+        2
+    )
+
     return {
-        "period": period, "start": iso(d_start), "end": iso(d_end),
-        "total": round(sum(by_method.values()), 2),
-        "count": len(payments),
-        "by_method": method_totals,
-        "daily": daily,
+        "period": period,
+        "start": iso(d_start),
+        "end": iso(d_end),
+        "total": total,
+        "by_method": {
+            k: round(v, 2)
+            for k, v in by_method.items()
+        },
         "payments": payments,
     }
 
@@ -1767,7 +2543,7 @@ async def club_info():
 
 @api.get("/")
 async def root():
-    return {"message": "Snooker Club API", "club": CLUB_NAME}
+    return {"message": "Supreme Snooker Club API", "club": CLUB_NAME}
 
 app.include_router(api)
 

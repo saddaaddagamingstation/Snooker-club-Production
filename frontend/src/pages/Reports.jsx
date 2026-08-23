@@ -350,21 +350,21 @@ function PaymentsTab({ params }) {
     <div className="space-y-4">
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <KpiCard label="Total" value={inr(d.total)} />
-        {d.by_method
-  .filter((m) => Number(m.amount) > 0)
-  .map((m) => (
+        {Object.entries(d.by_method || {})
+  .filter(([method, amount]) => Number(amount) > 0)
+  .map(([method, amount]) => (
     <KpiCard
-      key={m.method}
-      label={m.method.toUpperCase()}
-      value={inr(m.amount)}
+      key={method}
+      label={method.toUpperCase()}
+      value={inr(amount)}
       accent={
-        m.method === "cash"
+        method === "cash"
           ? "green"
-          : m.method === "upi"
+          : method === "upi"
           ? "blue"
-          : m.method === "card"
+          : method === "card"
           ? "amber"
-          : m.method === "credit"
+          : method === "credit"
           ? "red"
           : "fuchsia"
       }
@@ -372,7 +372,16 @@ function PaymentsTab({ params }) {
 ))}
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Panel title="Payment Method Split"><div className="h-64"><ResponsiveContainer><PieChart><Pie data={d.by_method} dataKey="amount" nameKey="method" outerRadius={80} innerRadius={45}>{d.by_method.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}</Pie><Tooltip contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", borderRadius: 12 }} /><Legend wrapperStyle={{ fontSize: 11, color: "#a3a3a3" }} /></PieChart></ResponsiveContainer></div></Panel>
+        <Panel title="Payment Method Split"><div className="h-64"><ResponsiveContainer><PieChart><Pie data={Object.entries(d.by_method || {}).map(([method, amount]) => ({
+    method,
+    amount: Number(amount),
+  }))}
+  dataKey="amount"
+  nameKey="method"
+  outerRadius={80}
+  innerRadius={45}>{Object.entries(d.by_method || {}).map(([method], i) => (
+  <Cell key={method} fill={COLORS[i % COLORS.length]} />
+))}</Pie><Tooltip contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", borderRadius: 12 }} /><Legend wrapperStyle={{ fontSize: 11, color: "#a3a3a3" }} /></PieChart></ResponsiveContainer></div></Panel>
         <Panel title="Daily Collection (14d)"><div className="h-64"><ResponsiveContainer><BarChart data={d.daily}><CartesianGrid stroke="#262626" /><XAxis dataKey="date" stroke="#737373" fontSize={10} /><YAxis stroke="#737373" fontSize={11} /><Tooltip contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", borderRadius: 12 }} /><Bar dataKey="amount" fill="#15803d" radius={[4, 4, 0, 0]} /></BarChart></ResponsiveContainer></div></Panel>
       </div>
       <Panel title={`Payments (${d.count})`}>
@@ -386,11 +395,148 @@ function PaymentsTab({ params }) {
 
 function SnacksTab({ params }) {
   const d = useReport("/reports", params);
-  if (!d) return <div className="text-gray-400">Loading…</div>;
+
+  if (!d) {
+    return <div className="text-gray-400">Loading…</div>;
+  }
+
   return (
-    <Panel title="Best-Selling Snacks">
-      <div className="h-72"><ResponsiveContainer><BarChart data={d.best_snacks}><CartesianGrid stroke="#262626" /><XAxis dataKey="name" stroke="#737373" fontSize={11} /><YAxis stroke="#737373" fontSize={11} /><Tooltip contentStyle={{ background: "#0a0a0a", border: "1px solid #262626", borderRadius: 12 }} /><Bar dataKey="qty" fill="#f59e0b" radius={[6, 6, 0, 0]} /></BarChart></ResponsiveContainer></div>
-    </Panel>
+    <div className="space-y-6">
+
+      {/* Best-Selling Snacks */}
+      <Panel title="Best-Selling Snacks">
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={d.best_snacks || []}>
+              <CartesianGrid stroke="#262626" />
+              <XAxis
+                dataKey="name"
+                stroke="#737373"
+                fontSize={11}
+              />
+              <YAxis
+                stroke="#737373"
+                fontSize={11}
+              />
+              <Tooltip
+                contentStyle={{
+                  background: "#0a0a0a",
+                  border: "1px solid #262626",
+                  borderRadius: 12
+                }}
+              />
+              <Bar
+                dataKey="qty"
+                fill="#f59e0b"
+                radius={[6, 6, 0, 0]}
+              />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </Panel>
+
+            {/* Detailed Snack Sales */}
+      <Panel title="Snack Sales Details">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[#262626] text-gray-500">
+                <th className="text-left py-3 px-3">Date</th>
+                <th className="text-left py-3 px-3">Source</th>
+                <th className="text-left py-3 px-3">Table</th>
+                <th className="text-left py-3 px-3">Snacks</th>
+                <th className="text-right py-3 px-3">Total Qty</th>
+                <th className="text-right py-3 px-3">Revenue</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {(d.snack_details || []).map((item, index) => (
+                <tr
+                  key={`${item.sold_at}-${item.table_number}-${index}`}
+                  className="border-b border-[#1c1c1c] hover:bg-[#171717]"
+                >
+                  {/* Date */}
+                  <td className="py-3 px-3 text-gray-400 whitespace-nowrap">
+                    {item.sold_at
+                      ? new Date(item.sold_at).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })
+                      : "—"}
+                  </td>
+
+                  {/* Source */}
+                  <td className="py-3 px-3">
+                    <span
+                      className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-semibold ${
+                        item.source === "food_only"
+                          ? "bg-amber-500/10 text-amber-400"
+                          : "bg-green-500/10 text-green-400"
+                      }`}
+                    >
+                      <span
+                        className={`w-2 h-2 rounded-full ${
+                          item.source === "food_only"
+                            ? "bg-orange-400"
+                            : "bg-green-400"
+                        }`}
+                      />
+                      {item.source === "food_only"
+                        ? "Food Only"
+                        : "Table"}
+                    </span>
+                  </td>
+
+                  {/* Table */}
+                  <td className="py-3 px-3 font-semibold text-white">
+                    {item.source === "food_only"
+                      ? "Food Only"
+                      : item.table_number || "—"}
+                  </td>
+
+                  {/* Snacks */}
+                  <td className="py-3 px-3 text-white">
+                    <div className="flex flex-wrap gap-x-2 gap-y-1">
+                      {(item.snacks || []).map((snack, snackIndex) => (
+                        <span key={snackIndex} className="whitespace-nowrap">
+                          {snack.name} ×{snack.quantity}
+                          {snackIndex < item.snacks.length - 1 && (
+                            <span className="text-gray-600 ml-2">·</span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+
+                  {/* Total Qty */}
+                  <td className="py-3 px-3 text-right font-semibold text-gray-300">
+                    {item.total_qty}
+                  </td>
+
+                  {/* Revenue */}
+                  <td className="py-3 px-3 text-right font-semibold text-green-400 whitespace-nowrap">
+                    ₹{Number(item.revenue || 0).toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+
+              {(!d.snack_details || d.snack_details.length === 0) && (
+                <tr>
+                  <td
+                    colSpan={6}
+                    className="py-10 text-center text-gray-500"
+                  >
+                    No snack sales found for this period.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+
+    </div>
   );
 }
 
