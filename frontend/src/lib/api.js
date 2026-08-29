@@ -25,15 +25,22 @@ export function formatApiErrorDetail(detail) {
   return String(detail);
 }
 
-// Display currency rounded to the nearest rupee
+// Display currency with exact paise
 // Examples:
-// 100.49 -> ₹100
-// 100.50 -> ₹101
-// 5231.40 -> ₹5,231
-// 5231.50 -> ₹5,232
+// 100 -> ₹100.00
+// 100.50 -> ₹100.50
+// 133.40 -> ₹133.40
+// 5231.25 -> ₹5,231.25
 export const inr = (n) =>
-  `₹${Math.round(Number(n || 0)).toLocaleString("en-IN")}`;
+  `₹${Number(n || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
 
-// Grand total also rounded to the nearest rupee
+// Kept for compatibility with existing code.
+// It now also displays the exact amount.
 export const inrRounded = (n) =>
-  `₹${Math.round(Number(n || 0)).toLocaleString("en-IN")}`;
+  `₹${Number(n || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;

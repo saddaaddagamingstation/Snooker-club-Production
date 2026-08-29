@@ -1149,11 +1149,17 @@ async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depen
     }
     snacks = s.get("snacks", [])
 
-    # Merge only with the immediately previous snack if it's the same
-    if snacks and snacks[-1]["snack_id"] == item["snack_id"]:
-        snacks[-1]["quantity"] += item["quantity"]
-        snacks[-1]["subtotal"] = (
-            snacks[-1]["quantity"] * snacks[-1]["price"]
+    # Merge with the existing snack anywhere in the cart
+    existing = next(
+        (snack_item for snack_item in snacks
+         if snack_item["snack_id"] == item["snack_id"]),
+        None
+    )
+
+    if existing:
+        existing["quantity"] += item["quantity"]
+        existing["subtotal"] = (
+            existing["quantity"] * existing["price"]
         )
     else:
         snacks.append(item)
@@ -1257,11 +1263,11 @@ async def pause_session(
             detail="Please start a frame first. You can pause the session only while a frame is running."
         )
 
-    if reason not in ["MANUAL", "BILLING"]:
+    if reason not in ["MANUAL", "BILLING", "FRAME_END"]:
         raise HTTPException(
             status_code=400,
             detail="Invalid pause reason"
-        )
+    )
 
     await db.sessions.update_one(
         {"id": session_id},
@@ -1383,10 +1389,25 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
         cf["notes"] = body.notes
 
         frame_start = datetime.fromisoformat(cf["start_time"])
+        frame_paused_seconds = float(
+            cf.get("paused_seconds", 0)
+        )
+
+        # If billing was opened while this frame was running,
+        # the current billing pause has not yet been added to
+        # the frame's paused_seconds, so subtract it here.
+        if s.get("is_paused") and s.get("pause_started_at"):
+            current_pause_seconds = (
+                end - datetime.fromisoformat(s["pause_started_at"])
+            ).total_seconds()
+        else:
+            current_pause_seconds = 0
 
         cf_seconds = max(
             0,
-            (end - frame_start).total_seconds() - paused_seconds
+            (end - frame_start).total_seconds()
+            - frame_paused_seconds
+            - current_pause_seconds
         )
 
         cf_amount = round((cf_seconds / 3600.0) * rate, 2)
@@ -1483,7 +1504,25 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         frame = dict(s["current_frame"])
         frame["end_time"] = iso(end)
         frame_start = datetime.fromisoformat(frame["start_time"])
-        dur_sec = max( 0,(end - frame_start).total_seconds() - paused_seconds)
+        frame_paused_seconds = float(
+            frame.get("paused_seconds", 0)
+        )
+
+        # If the current frame is frozen for billing,
+        # exclude the current billing pause as well.
+        if s.get("is_paused") and s.get("pause_started_at"):
+            current_pause_seconds = (
+                end - datetime.fromisoformat(s["pause_started_at"])
+            ).total_seconds()
+        else:
+            current_pause_seconds = 0
+
+        dur_sec = max(
+            0,
+            (end - frame_start).total_seconds()
+            - frame_paused_seconds
+            - current_pause_seconds
+        )
         frame["duration_minutes"] = int(dur_sec / 60)
         frame["amount"] = round((dur_sec / 3600.0) * rate, 2)
         frame["auto_closed"] = True

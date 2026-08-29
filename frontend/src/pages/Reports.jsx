@@ -56,15 +56,25 @@ function DatePicker({
   }
 
   function handleSelect(date) {
-    if (!date) return;
+  if (!date) return;
 
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-
-    onChange(`${year}-${month}-${day}`);
-    setOpen(false);
+  if (minDate && date < minDate) {
+    toast.error("To date cannot be before the From date.");
+    return;
   }
+
+  if (maxDate && date > maxDate) {
+    toast.error("From date cannot be after the To date.");
+    return;
+  }
+
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  onChange(`${year}-${month}-${day}`);
+  setOpen(false);
+}
 
   function clearDate() {
     onChange("");
@@ -148,8 +158,8 @@ function DatePicker({
                 "p-0 text-center",
 
               day_button:
-                "mx-auto h-9 w-9 rounded-lg flex items-center justify-center text-sm text-gray-300 hover:bg-[#262626] hover:text-white transition-all",
-
+                "mx-auto h-9 w-9 rounded-lg flex items-center justify-center text-sm text-gray-300 hover:bg-[#262626] hover:text-white transition-all disabled:text-[#333333] disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none",
+              
               selected:
                 "bg-green-600 text-white hover:bg-green-600 hover:text-white",
 
@@ -160,7 +170,7 @@ function DatePicker({
                 "text-gray-700 hover:text-gray-500 hover:bg-transparent",
 
               disabled:
-                "text-gray-700 cursor-not-allowed hover:bg-transparent",
+                "text-gray-600 cursor-not-allowed pointer-events-none hover:bg-transparent",
             }}
           />
 
@@ -234,22 +244,42 @@ export default function Reports() {
               className={`h-11 px-4 rounded-xl border text-sm font-semibold ${period === p.key && !start ? "bg-green-700 border-green-700 text-white" : "bg-[#141414] border-[#262626] text-gray-400 hover:text-white"}`}>{p.label}</button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
-  <DatePicker
-    value={start}
-    onChange={setStart}
-    placeholder="dd-mm-yyyy"
-    maxDate={end ? new Date(`${end}T00:00:00`) : undefined}
-  />
+        <div className="flex items-center gap-3 flex-wrap">
+  <div className="flex items-center gap-2">
+    <span className="text-sm font-semibold text-gray-400">
+      From:
+    </span>
+
+    <DatePicker
+      value={start}
+      onChange={setStart}
+      placeholder="dd-mm-yyyy"
+      maxDate={
+        end
+          ? new Date(`${end}T00:00:00`)
+          : new Date()
+      }
+    />
+  </div>
 
   <span className="text-gray-500 px-1">→</span>
 
-  <DatePicker
-    value={end}
-    onChange={setEnd}
-    placeholder="dd-mm-yyyy"
-    minDate={start ? new Date(`${start}T00:00:00`) : undefined}
-  />
+  <div className="flex items-center gap-2">
+    <span className="text-sm font-semibold text-gray-400">
+      To:
+    </span>
+
+    <DatePicker
+      value={end}
+      onChange={setEnd}
+      placeholder="dd-mm-yyyy"
+      minDate={
+        start
+          ? new Date(`${start}T00:00:00`)
+          : undefined
+      }
+    />
+  </div>
 </div>
 </div>
 
@@ -281,16 +311,31 @@ function KpiCard({ icon: Icon, label, value, accent = "green", sub }) {
     fuchsia: "text-fuchsia-400",
   }[accent];
 
+  const valueLength = String(value ?? "").length;
+
+  const valueSize =
+    valueLength <= 10
+      ? "text-2xl sm:text-3xl"
+      : valueLength <= 12
+      ? "text-xl sm:text-2xl"
+      : valueLength <= 14
+      ? "text-lg sm:text-xl"
+      : "text-base sm:text-lg";
+
   return (
-    <div className="bg-[#141414] border border-[#262626] rounded-2xl p-5">
-      <div className="flex items-center justify-between">
-        <div className="text-xs uppercase tracking-wider text-gray-500 font-bold">
+    <div className="bg-[#141414] border border-[#262626] rounded-2xl p-5 min-w-0">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs uppercase tracking-wider text-gray-500 font-bold truncate">
           {label}
         </div>
-        {Icon && <Icon className={`w-4 h-4 ${cls}`} />}
+
+        {Icon && <Icon className={`w-4 h-4 ${cls} shrink-0`} />}
       </div>
 
-      <div className={`text-2xl sm:text-3xl font-bold font-mono mt-3 ${cls}`}>
+      <div
+        className={`${valueSize} font-bold font-mono mt-3 ${cls} whitespace-nowrap tracking-tight`}
+        title={String(value ?? "")}
+      >
         {value}
       </div>
 
@@ -302,6 +347,7 @@ function KpiCard({ icon: Icon, label, value, accent = "green", sub }) {
     </div>
   );
 }
+
 function Panel({ title, children }) { return <div className="bg-[#141414] border border-[#262626] rounded-2xl p-6"><h3 className="text-lg font-bold mb-4">{title}</h3>{children}</div>; }
 
 function exportCSV(rows, filename) {

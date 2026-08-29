@@ -50,7 +50,7 @@ export default function Bill() {
       `Table charge: ${inr(s.table_amount)}`,
       `Snacks: ${inr(s.snacks_amount)}`,
       `Discount: ${inr(s.discount)} | Tax: ${inr(s.tax_amount)}`,
-      `*Grand Total: ${inrRounded(s.grand_total)}*`,
+      `*Grand Total: ${inr(s.grand_total)}*`,
       ...(payLines.length ? ["", "Payment:", ...payLines, "Status: PAID"] : []),
     ];
     window.open(`https://wa.me/?text=${encodeURIComponent(lines.join("\n"))}`, "_blank");
@@ -165,7 +165,7 @@ export default function Bill() {
         )}
         <div className="pt-4 border-t border-[#262626] flex items-center justify-between">
           <div className="text-sm uppercase tracking-[0.2em] font-bold text-gray-400">Grand Total</div>
-          <div className="text-4xl font-bold font-mono text-green-400" data-testid="bill-grand-total">{inrRounded(s.grand_total)}</div>
+          <div className="text-4xl font-bold font-mono text-green-400" data-testid="bill-grand-total">{inr(s.grand_total)}</div>
         </div>
         <div className="mt-8 text-center text-xs text-gray-500">Thank you for playing at {club}. Rack 'em up again soon.</div>
       </div>
