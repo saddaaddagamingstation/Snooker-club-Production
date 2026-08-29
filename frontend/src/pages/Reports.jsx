@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import api, { inr, formatApiErrorDetail } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { Calendar, Download, TrendingUp, TrendingDown, Wallet, IndianRupee, PieChart as PieIcon,} from "lucide-react";
+import { DayPicker } from "react-day-picker";
+import "react-day-picker/style.css";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, PieChart, Pie, Cell, Legend, LineChart, Line } from "recharts";
 import { toast } from "sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue,} from "@/components/ui/select";
@@ -13,6 +15,177 @@ const PERIODS = [
   { key: "monthly", label: "This Month" },
 ];
 const COLORS = ["#15803d", "#f59e0b", "#3b82f6", "#a855f7", "#ef4444", "#10b981", "#eab308", "#0ea5e9"];
+
+function DatePicker({
+  value,
+  onChange,
+  placeholder = "dd-mm-yyyy",
+  minDate,
+  maxDate,
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef(null);
+
+  const selectedDate = value
+    ? new Date(`${value}T00:00:00`)
+    : undefined;
+
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (
+        wrapperRef.current &&
+        !wrapperRef.current.contains(event.target)
+      ) {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handleClickOutside);
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, []);
+
+  function formatDisplayDate(dateString) {
+    if (!dateString) return placeholder;
+
+    const [year, month, day] = dateString.split("-");
+
+    return `${day}-${month}-${year}`;
+  }
+
+  function handleSelect(date) {
+    if (!date) return;
+
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+
+    onChange(`${year}-${month}-${day}`);
+    setOpen(false);
+  }
+
+  function clearDate() {
+    onChange("");
+    setOpen(false);
+  }
+
+  function selectToday() {
+    const today = new Date();
+
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, "0");
+    const day = String(today.getDate()).padStart(2, "0");
+
+    onChange(`${year}-${month}-${day}`);
+    setOpen(false);
+  }
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className={`h-11 w-[155px] px-3 rounded-xl bg-[#0f0f0f] border border-[#262626] hover:border-[#3a3a3a] transition-colors flex items-center justify-between gap-2 text-sm ${
+          value ? "text-white" : "text-gray-500"
+        }`}
+      >
+        <span className="truncate">
+          {formatDisplayDate(value)}
+        </span>
+
+        <Calendar className="w-4 h-4 text-gray-500 shrink-0" />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-[calc(100%+8px)] z-[100] w-[350px] rounded-2xl border border-[#2a2a2a] bg-[#111111] shadow-2xl shadow-black/60 p-4">
+          <DayPicker
+            mode="single"
+            selected={selectedDate}
+            onSelect={handleSelect}
+            disabled={{
+              ...(minDate ? { before: minDate } : {}),
+              ...(maxDate ? { after: maxDate } : {}),
+            }}
+            showOutsideDays
+            classNames={{
+              root: "w-full",
+              months: "w-full",
+              month: "w-full",
+
+              month_caption:
+                "flex items-center justify-between h-10 mb-3",
+
+              caption_label:
+                "text-[15px] font-bold text-white",
+
+              nav:
+                "flex items-center gap-1",
+
+              button_previous:
+                "h-8 w-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#262626] transition-colors",
+
+              button_next:
+                "h-8 w-8 rounded-lg flex items-center justify-center text-gray-400 hover:text-white hover:bg-[#262626] transition-colors",
+
+              month_grid:
+                "w-full table-fixed border-collapse",
+
+              weekdays:
+                "w-full",
+
+              weekday:
+                "text-[11px] font-semibold text-gray-500 text-center h-9 p-0",
+
+              weeks:
+                "w-full",
+
+              week:
+                "w-full",
+
+              day:
+                "p-0 text-center",
+
+              day_button:
+                "mx-auto h-9 w-9 rounded-lg flex items-center justify-center text-sm text-gray-300 hover:bg-[#262626] hover:text-white transition-all",
+
+              selected:
+                "bg-green-600 text-white hover:bg-green-600 hover:text-white",
+
+              today:
+                "text-green-400 font-bold",
+
+              outside:
+                "text-gray-700 hover:text-gray-500 hover:bg-transparent",
+
+              disabled:
+                "text-gray-700 cursor-not-allowed hover:bg-transparent",
+            }}
+          />
+
+          <div className="flex items-center justify-between border-t border-[#262626] pt-3 mt-2">
+            <button
+              type="button"
+              onClick={clearDate}
+              className="text-xs font-semibold text-gray-500 hover:text-white transition-colors"
+            >
+              Clear
+            </button>
+
+            <button
+              type="button"
+              onClick={selectToday}
+              className="text-xs font-semibold text-green-400 hover:text-green-300 transition-colors"
+            >
+              Today
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function Reports() {
   const { can } = useAuth();
@@ -62,12 +235,23 @@ export default function Reports() {
           ))}
         </div>
         <div className="flex items-center gap-2">
-          <Calendar className="w-4 h-4 text-gray-500" />
-          <input type="date" value={start} onChange={(e) => setStart(e.target.value)} data-testid="date-start" className="h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white text-sm" />
-          <span className="text-gray-500">→</span>
-          <input type="date" value={end} onChange={(e) => setEnd(e.target.value)} data-testid="date-end" className="h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white text-sm" />
-        </div>
-      </div>
+  <DatePicker
+    value={start}
+    onChange={setStart}
+    placeholder="dd-mm-yyyy"
+    maxDate={end ? new Date(`${end}T00:00:00`) : undefined}
+  />
+
+  <span className="text-gray-500 px-1">→</span>
+
+  <DatePicker
+    value={end}
+    onChange={setEnd}
+    placeholder="dd-mm-yyyy"
+    minDate={start ? new Date(`${start}T00:00:00`) : undefined}
+  />
+</div>
+</div>
 
       {tab === "overview" && <OverviewTab params={params()} />}
       {tab === "revenue" && <RevenueTab params={params()} />}
@@ -89,12 +273,32 @@ function useReport(url, params) {
 }
 
 function KpiCard({ icon: Icon, label, value, accent = "green", sub }) {
-  const cls = { green: "text-green-400", red: "text-red-400", blue: "text-blue-400", amber: "text-amber-400", fuchsia: "text-fuchsia-400" }[accent];
+  const cls = {
+    green: "text-green-400",
+    red: "text-red-400",
+    blue: "text-blue-400",
+    amber: "text-amber-400",
+    fuchsia: "text-fuchsia-400",
+  }[accent];
+
   return (
     <div className="bg-[#141414] border border-[#262626] rounded-2xl p-5">
-      <div className="sticky top-16 z-30 flex items-center justify-between bg-[#141414] py-4">{Icon && <Icon className={`w-4 h-4 ${cls}`} />}</div>
-      <div className={`text-2xl sm:text-3xl font-bold font-mono mt-2 ${cls}`}>{value}</div>
-      {sub && <div className="text-xs text-gray-500 mt-1">{sub}</div>}
+      <div className="flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wider text-gray-500 font-bold">
+          {label}
+        </div>
+        {Icon && <Icon className={`w-4 h-4 ${cls}`} />}
+      </div>
+
+      <div className={`text-2xl sm:text-3xl font-bold font-mono mt-3 ${cls}`}>
+        {value}
+      </div>
+
+      {sub && (
+        <div className="text-xs text-gray-500 mt-1">
+          {sub}
+        </div>
+      )}
     </div>
   );
 }

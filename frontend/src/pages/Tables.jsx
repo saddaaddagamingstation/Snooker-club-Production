@@ -18,12 +18,27 @@ function useTimer() {
   return now;
 }
 
-function elapsed(startIso) {
-  const ms = Date.now() - new Date(startIso).getTime();
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
+function elapsed(session) {
+  const startMs = new Date(session.start_time).getTime();
+
+  let pausedSeconds = Number(session.paused_seconds || 0);
+
+  if (session.is_paused && session.pause_started_at) {
+    pausedSeconds +=
+      (Date.now() - new Date(session.pause_started_at).getTime()) / 1000;
+  }
+
+  const seconds = Math.max(
+    0,
+    Math.floor(
+      (Date.now() - startMs) / 1000 - pausedSeconds
+    )
+  );
+
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const sec = seconds % 60;
+
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
@@ -184,7 +199,7 @@ export default function Tables() {
                   <div className="flex items-center gap-2 text-xs text-amber-300/80">
                     <Clock className="w-3.5 h-3.5 pulse-dot" /> RUNNING
                   </div>
-                  <div className="text-2xl font-mono font-bold mt-1 text-amber-300">{elapsed(active.start_time)}</div>
+                  <div className="text-2xl font-mono font-bold mt-1 text-amber-300">{elapsed(active)}</div>
                   {active.customer_name && <div className="text-xs text-gray-400 mt-1 truncate">{active.customer_name}</div>}
                 </div>
               ) : (
