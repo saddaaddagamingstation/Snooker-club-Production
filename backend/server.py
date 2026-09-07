@@ -146,19 +146,109 @@ class FrameStart(BaseModel):
     player_a: Optional[str] = ""
     player_b: Optional[str] = ""
 
-# ---- Expense/Vendor models ----
-EXPENSE_CATEGORIES = {
-    "Fixed Expenses": ["Rent", "Salary", "Electricity", "Water", "Internet", "Security", "Insurance", "Software"],
-    "Equipment": ["Cloth", "Cushion", "Cue Repair", "Cue Tips", "Balls", "Chalk", "Pocket Repair", "Lighting"],
-    "Food & Beverage Purchases": ["Snacks", "Beverages", "Kitchen Supplies"],
-    "Operations": ["Cleaning", "Consumables", "Stationery"],
-    "Marketing": ["Ads", "Print", "Digital", "Events"],
-    "Maintenance": ["Table Service", "AC/HVAC", "Plumbing", "General"],
-    "Taxes & Finance": ["GST", "Bank Fees", "Interest"],
-    "Tournament Expenses": ["Prize Money", "Trophies", "Refreshments"],
-    "Miscellaneous": ["Other"],
-}
+# ---- Expense Categories ----
+
+DEFAULT_EXPENSE_CATEGORIES = [
+    {
+        "name": "Fixed Expenses",
+        "subcategories": [
+            "Rent",
+            "Salary",
+            "Electricity",
+            "Water",
+            "Internet",
+            "Security",
+            "Insurance",
+            "Software",
+        ],
+    },
+    {
+        "name": "Equipment",
+        "subcategories": [
+            "Cloth",
+            "Cushion",
+            "Cue Repair",
+            "Cue Tips",
+            "Balls",
+            "Chalk",
+            "Pocket Repair",
+            "Lighting",
+        ],
+    },
+    {
+        "name": "Food & Beverage Purchases",
+        "subcategories": [
+            "Snacks",
+            "Beverages",
+            "Kitchen Supplies",
+        ],
+    },
+    {
+        "name": "Operations",
+        "subcategories": [
+            "Cleaning",
+            "Consumables",
+            "Stationery",
+        ],
+    },
+    {
+        "name": "Marketing",
+        "subcategories": [
+            "Ads",
+            "Print",
+            "Digital",
+            "Events",
+        ],
+    },
+    {
+        "name": "Maintenance",
+        "subcategories": [
+            "Table Service",
+            "AC/HVAC",
+            "Plumbing",
+            "General",
+        ],
+    },
+    {
+        "name": "Taxes & Finance",
+        "subcategories": [
+            "GST",
+            "Bank Fees",
+            "Interest",
+        ],
+    },
+    {
+        "name": "Tournament Expenses",
+        "subcategories": [
+            "Prize Money",
+            "Trophies",
+            "Refreshments",
+        ],
+    },
+    {
+        "name": "Miscellaneous",
+        "subcategories": [
+            "Other",
+        ],
+    },
+]
+
 PAYMENT_METHODS = ["cash", "upi", "card", "bank", "credit"]
+
+class ExpenseCategoryCreate(BaseModel):
+    name: str
+
+
+class ExpenseCategoryUpdate(BaseModel):
+    name: str
+
+
+class ExpenseSubcategoryCreate(BaseModel):
+    name: str
+
+
+class ExpenseSubcategoryUpdate(BaseModel):
+    name: str
 
 class ExpenseIn(BaseModel):
     date: str  # ISO date
@@ -205,6 +295,113 @@ class RecurringIn(BaseModel):
     day_of_month: int = 1
     active: bool = True
     notes: Optional[str] = ""
+
+
+# ---- Expense Category Migration ----
+
+async def ensure_expense_categories():
+    existing = await db.expense_categories.find(
+        {},
+        {"_id": 0}
+    ).to_list(1000)
+
+    now = iso(now_utc())
+
+    # If categories already exist in the NEW structure,
+    # don't recreate them.
+    if existing and all(
+        "id" in c and
+        "name" in c and
+        "subcategories" in c
+        for c in existing
+    ):
+        print("Expense categories already migrated. Skipping migration.")
+        return
+
+    # Build categories from the default structure.
+    category_map = {}
+
+    for index, category in enumerate(
+        DEFAULT_EXPENSE_CATEGORIES,
+        start=1
+    ):
+        category_id = str(uuid.uuid4())
+
+        subcategories = []
+
+        for sub_name in category["subcategories"]:
+            subcategories.append({
+                "id": str(uuid.uuid4()),
+                "name": sub_name,
+                "active": True,
+                "created_at": now,
+            })
+
+        category_map[category["name"].lower()] = {
+            "id": category_id,
+            "name": category["name"],
+            "active": True,
+            "sort_order": index,
+            "subcategories": subcategories,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    # Convert any OLD category/subcategory records.
+    for old in existing:
+        old_category = (old.get("category") or "").strip()
+        old_subcategory = (old.get("subcategory") or "").strip()
+
+        if not old_category:
+            continue
+
+        category_key = old_category.lower()
+
+        # Create custom category if it isn't one
+        # of our default categories.
+        if category_key not in category_map:
+            category_map[category_key] = {
+                "id": str(uuid.uuid4()),
+                "name": old_category,
+                "active": True,
+                "sort_order": len(category_map) + 1,
+                "subcategories": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+
+        # Preserve old subcategory.
+        if old_subcategory:
+            existing_subcategories = {
+                s["name"].lower()
+                for s in category_map[category_key]["subcategories"]
+            }
+
+            if old_subcategory.lower() not in existing_subcategories:
+                category_map[category_key]["subcategories"].append({
+                    "id": str(uuid.uuid4()),
+                    "name": old_subcategory,
+                    "active": True,
+                    "created_at": now,
+                })
+
+    categories = list(category_map.values())
+
+    # Rebuild sort order.
+    for index, category in enumerate(categories, start=1):
+        category["sort_order"] = index
+
+    # Replace old category documents with the
+    # new category structure.
+    await db.expense_categories.delete_many({})
+
+    if categories:
+        await db.expense_categories.insert_many(categories)
+
+    print(
+        f"Migrated {len(categories)} expense categories "
+        f"to the new structure."
+    )
 
 # ---- Auth dependency ----
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -2114,27 +2311,400 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
         "sessions": sessions,
     }
 
-# ---- Expense Categories helper ----
-@api.get("/expenses/categories")
-async def list_expense_categories(user=Depends(get_current_user)):
-    # Fetch custom sub-categories added by admin
-    custom = await db.expense_categories.find({}, {"_id": 0}).to_list(500)
-    merged = {k: list(v) for k, v in EXPENSE_CATEGORIES.items()}
-    for c in custom:
-        merged.setdefault(c["category"], [])
-        if c.get("subcategory") and c["subcategory"] not in merged[c["category"]]:
-            merged[c["category"]].append(c["subcategory"])
-    return {"categories": merged, "payment_methods": PAYMENT_METHODS}
+# ---- Expense Category Management ----
 
-class CustomCategoryIn(BaseModel):
-    category: str
-    subcategory: str
+def _clean_category_name(name: str) -> str:
+    return " ".join((name or "").strip().split())
+
+
+def _category_response(category: dict) -> dict:
+    return {
+        "id": category["id"],
+        "name": category["name"],
+        "active": category.get("active", True),
+        "sort_order": category.get("sort_order", 0),
+        "subcategories": [
+            {
+                "id": s["id"],
+                "name": s["name"],
+                "active": s.get("active", True),
+            }
+            for s in category.get("subcategories", [])
+        ],
+        "created_at": category.get("created_at"),
+        "updated_at": category.get("updated_at"),
+    }
+
+
+async def _find_expense_category(category_id: str):
+    category = await db.expense_categories.find_one(
+        {"id": category_id},
+        {"_id": 0}
+    )
+
+    if not category:
+        raise HTTPException(
+            status_code=404,
+            detail="Expense category not found"
+        )
+
+    return category
+
+
+@api.get("/expenses/categories")
+async def list_expense_categories(
+    user=Depends(get_current_user)
+):
+    categories = await db.expense_categories.find(
+        {"active": True},
+        {"_id": 0}
+    ).sort("sort_order", 1).to_list(500)
+
+    result = {}
+
+    for category in categories:
+        result[category["name"]] = [
+            s["name"]
+            for s in category.get("subcategories", [])
+            if s.get("active", True)
+        ]
+
+    return {
+        "categories": result,
+        "payment_methods": PAYMENT_METHODS,
+    }
+
+
+@api.get("/expenses/category-management")
+async def expense_category_management(
+    user=Depends(require_permission("view_expenses"))
+):
+    categories = await db.expense_categories.find(
+        {},
+        {"_id": 0}
+    ).sort("sort_order", 1).to_list(500)
+
+    return {
+        "categories": [
+            _category_response(c)
+            for c in categories
+        ]
+    }
+
 
 @api.post("/expenses/categories")
-async def add_expense_category(body: CustomCategoryIn, user=Depends(require_permission("manage_expenses"))):
-    doc = {"id": str(uuid.uuid4()), "category": body.category, "subcategory": body.subcategory, "created_at": iso(now_utc())}
-    await db.expense_categories.insert_one(doc.copy())
-    return {k: v for k, v in doc.items() if k != "_id"}
+async def create_expense_category(
+    body: ExpenseCategoryCreate,
+    user=Depends(require_permission("manage_expenses"))
+):
+    name = _clean_category_name(body.name)
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="Category name is required"
+        )
+
+    existing = await db.expense_categories.find_one({
+        "name": {
+            "$regex": f"^{name}$",
+            "$options": "i"
+        }
+    })
+
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="Category already exists"
+        )
+
+    last = await db.expense_categories.find_one(
+        {},
+        sort=[("sort_order", -1)]
+    )
+
+    sort_order = (
+        int(last.get("sort_order", 0)) + 1
+        if last else 1
+    )
+
+    now = iso(now_utc())
+
+    category = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "active": True,
+        "sort_order": sort_order,
+        "subcategories": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    await db.expense_categories.insert_one(
+        category.copy()
+    )
+
+    return _category_response(category)
+
+
+@api.put("/expenses/categories/{category_id}")
+async def update_expense_category(
+    category_id: str,
+    body: ExpenseCategoryUpdate,
+    user=Depends(require_permission("manage_expenses"))
+):
+    category = await _find_expense_category(category_id)
+
+    new_name = _clean_category_name(body.name)
+
+    if not new_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Category name is required"
+        )
+
+    old_name = category["name"]
+
+    if new_name.lower() != old_name.lower():
+        duplicate = await db.expense_categories.find_one({
+            "name": {
+                "$regex": f"^{new_name}$",
+                "$options": "i"
+            },
+            "id": {"$ne": category_id}
+        })
+
+        if duplicate:
+            raise HTTPException(
+                status_code=400,
+                detail="Category already exists"
+            )
+
+    await db.expense_categories.update_one(
+        {"id": category_id},
+        {
+            "$set": {
+                "name": new_name,
+                "updated_at": iso(now_utc())
+            }
+        }
+    )
+
+    if old_name != new_name:
+        await db.expenses.update_many(
+            {"category": old_name},
+            {"$set": {"category": new_name}}
+        )
+
+        await db.recurring_expenses.update_many(
+            {"category": old_name},
+            {"$set": {"category": new_name}}
+        )
+
+    return await _find_expense_category(category_id)
+
+
+@api.delete("/expenses/categories/{category_id}")
+async def archive_expense_category(
+    category_id: str,
+    user=Depends(require_permission("manage_expenses"))
+):
+    category = await _find_expense_category(category_id)
+
+    if not category.get("active", True):
+        raise HTTPException(
+            status_code=400,
+            detail="Category is already archived"
+        )
+
+    await db.expense_categories.update_one(
+        {"id": category_id},
+        {
+            "$set": {
+                "active": False,
+                "updated_at": iso(now_utc())
+            }
+        }
+    )
+
+    return {
+        "ok": True,
+        "message": "Category archived"
+    }
+
+
+@api.post(
+    "/expenses/categories/{category_id}/subcategories"
+)
+async def create_expense_subcategory(
+    category_id: str,
+    body: ExpenseSubcategoryCreate,
+    user=Depends(require_permission("manage_expenses"))
+):
+    category = await _find_expense_category(category_id)
+
+    if not category.get("active", True):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot modify an archived category"
+        )
+
+    name = _clean_category_name(body.name)
+
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="Sub-category name is required"
+        )
+
+    for sub in category.get("subcategories", []):
+        if sub["name"].lower() == name.lower():
+            raise HTTPException(
+                status_code=400,
+                detail="Sub-category already exists"
+            )
+
+    subcategory = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "active": True,
+        "created_at": iso(now_utc()),
+    }
+
+    await db.expense_categories.update_one(
+        {"id": category_id},
+        {
+            "$push": {
+                "subcategories": subcategory
+            },
+            "$set": {
+                "updated_at": iso(now_utc())
+            }
+        }
+    )
+
+    return subcategory
+
+
+@api.put(
+    "/expenses/categories/{category_id}/subcategories/{subcategory_id}"
+)
+async def update_expense_subcategory(
+    category_id: str,
+    subcategory_id: str,
+    body: ExpenseSubcategoryUpdate,
+    user=Depends(require_permission("manage_expenses"))
+):
+    category = await _find_expense_category(category_id)
+
+    new_name = _clean_category_name(body.name)
+
+    if not new_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Sub-category name is required"
+        )
+
+    target = None
+
+    for sub in category.get("subcategories", []):
+        if sub["id"] == subcategory_id:
+            target = sub
+            break
+
+    if not target:
+        raise HTTPException(
+            status_code=404,
+            detail="Sub-category not found"
+        )
+
+    old_name = target["name"]
+
+    await db.expense_categories.update_one(
+        {
+            "id": category_id,
+            "subcategories.id": subcategory_id
+        },
+        {
+            "$set": {
+                "subcategories.$.name": new_name,
+                "updated_at": iso(now_utc())
+            }
+        }
+    )
+
+    if old_name != new_name:
+        await db.expenses.update_many(
+            {
+                "category": category["name"],
+                "subcategory": old_name
+            },
+            {
+                "$set": {
+                    "subcategory": new_name
+                }
+            }
+        )
+
+        await db.recurring_expenses.update_many(
+            {
+                "category": category["name"],
+                "subcategory": old_name
+            },
+            {
+                "$set": {
+                    "subcategory": new_name
+                }
+            }
+        )
+
+    return {
+        "id": subcategory_id,
+        "name": new_name,
+        "active": target.get("active", True)
+    }
+
+
+@api.delete(
+    "/expenses/categories/{category_id}/subcategories/{subcategory_id}"
+)
+async def archive_expense_subcategory(
+    category_id: str,
+    subcategory_id: str,
+    user=Depends(require_permission("manage_expenses"))
+):
+    category = await _find_expense_category(category_id)
+
+    target = None
+
+    for sub in category.get("subcategories", []):
+        if sub["id"] == subcategory_id:
+            target = sub
+            break
+
+    if not target:
+        raise HTTPException(
+            status_code=404,
+            detail="Sub-category not found"
+        )
+
+    await db.expense_categories.update_one(
+        {
+            "id": category_id,
+            "subcategories.id": subcategory_id
+        },
+        {
+            "$set": {
+                "subcategories.$.active": False,
+                "updated_at": iso(now_utc())
+            }
+        }
+    )
+
+    return {
+        "ok": True,
+        "message": "Sub-category archived"
+    }
 
 # ---- Expenses ----
 def _parse_date(d: Optional[str]) -> datetime:
@@ -2649,6 +3219,8 @@ async def seed():
     await db.payments.create_index("created_at")
     await db.payments.create_index("session_id")
     await db.vendors.create_index("name")
+    
+    await ensure_expense_categories()
 
     if await db.tables.count_documents({}) == 0:
         defaults = [
