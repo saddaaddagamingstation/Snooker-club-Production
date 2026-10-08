@@ -82,14 +82,14 @@ export default function Dashboard() {
     ]);
     setStats(s.data); setCharts(c.data); setRecent(r.data);
   };
-  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, []);
+  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, []);
 
   return (
     <div className="space-y-8" data-testid="dashboard-page">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight">Today's Performance</h1>
-          <p className="text-gray-400 mt-2">Live snapshot of your club. Auto-refreshes every 15s.</p>
+          <p className="text-gray-400 mt-2">Live snapshot of your club. Auto-refreshes every 30s.</p>
         </div>
         <div className="flex items-center gap-3">
   <button

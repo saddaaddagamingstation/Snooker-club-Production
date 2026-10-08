@@ -182,7 +182,7 @@ export default function Sessions() {
   };
   useEffect(() => {
     load();
-    const t1 = setInterval(load, 8000);
+    const t1 = setInterval(load, 20000);
     const t2 = setInterval(() => setTick((x) => x + 1), 1000);
     return () => {
       clearInterval(t1);
