@@ -1,4 +1,5 @@
 import asyncio
+import time
 from dotenv import load_dotenv
 from pathlib import Path
 from typing import Literal
@@ -404,26 +405,64 @@ async def ensure_expense_categories():
         f"to the new structure."
     )
 
+USER_CACHE = {}
+USER_CACHE_TTL = 30  # seconds
+
 # ---- Auth dependency ----
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security)
+):
     if not credentials or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated"
+        )
+
+    token = credentials.credentials
+
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALG])
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALG]
+        )
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
+        raise HTTPException(
+            status_code=401,
+            detail="Token expired"
+        )
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0, "password_hash": 0})
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid token"
+        )
+
+    user_id = payload["sub"]
+    now = time.monotonic()
+
+    cached = USER_CACHE.get(user_id)
+
+    if cached:
+        user, cached_at = cached
+
+        if now - cached_at < USER_CACHE_TTL:
+            return user
+
+        USER_CACHE.pop(user_id, None)
+
+    user = await db.users.find_one(
+        {"id": user_id},
+        {"_id": 0, "password_hash": 0}
+    )
+
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-        print("=" * 50)
-        print("JWT SUB:", payload["sub"])
-        print("USER ID:", user["id"])
-        print("EMAIL:", user["email"])
-        print("ROLE:", user["role"])
-        print("PERMISSIONS:", user.get("permissions"))
-        print("=" * 50)
+        raise HTTPException(
+            status_code=401,
+            detail="User not found"
+        )
+
+    USER_CACHE[user_id] = (user, now)
+
     return user
 
 def require_admin(user=Depends(get_current_user)):
@@ -1190,7 +1229,6 @@ async def list_sessions(
         )
 
     return rows
-
 @api.get("/sessions/active")
 async def active_sessions(user=Depends(get_current_user)):
     rows = await db.sessions.find(
@@ -2046,6 +2084,12 @@ async def dashboard_stats(user=Depends(get_current_user)):
             }
         ).to_list(1000)
     )
+
+    table_revenue_today = round(
+    sum(
+        float(s.get("grand_total", 0))
+        for s in completed_today
+    ),2)
 
     available = sum(
         1 for t in tables

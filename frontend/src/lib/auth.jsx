@@ -21,16 +21,20 @@ export function AuthProvider({ children }) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  // Live permission sync: refresh on window focus, on visibility change, and every 20s
+  // Refresh permissions when the user returns to the app.
   useEffect(() => {
-    const onFocus = () => { if (localStorage.getItem("snk_token")) refresh(); };
+    const onFocus = () => {
+      if (localStorage.getItem("snk_token")) {
+        refresh();
+      }
+    };
+
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onFocus);
-    const t = setInterval(() => { if (localStorage.getItem("snk_token")) refresh(); }, 20000);
+
     return () => {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
-      clearInterval(t);
     };
   }, [refresh]);
 
