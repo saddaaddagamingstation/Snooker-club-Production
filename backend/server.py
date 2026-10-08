@@ -1406,7 +1406,7 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
     await db.sessions.insert_one(session.copy())
     await db.tables.update_one({"id": table["id"]}, {"$set": {"status": "running"}})
     session.pop("_id", None)
-    await _session_with_details(session)
+    session["table"] = table
     return session
 
 @api.post("/sessions/{session_id}/snacks")
@@ -1465,8 +1465,14 @@ async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depen
     # decrement stock
     new_stock = max(0, int(snack.get("stock_quantity", 0)) - body.quantity)
     await db.snacks.update_one({"id": snack["id"]}, {"$set": {"stock_quantity": new_stock}})
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    await _session_with_details(s)
+    s["snacks"] = snacks
+    s["snacks_amount"] = snacks_amount
+    s["table"] = await db.tables.find_one(
+        {"id": s["table_id"]},
+        {"_id": 0}
+    )
+    s["snacks_total"] = snacks_amount
+
     return s
 
 @api.delete("/sessions/{session_id}/snacks/{index}")
@@ -1568,8 +1574,13 @@ async def pause_session(
         },
     )
 
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    await _session_with_details(s)
+    s["is_paused"] = True
+    s["pause_started_at"] = now_utc().isoformat()
+    s["pause_reason"] = reason
+    s["table"] = await db.tables.find_one(
+        {"id": s["table_id"]},
+        {"_id": 0}
+    )
 
     return s
 
@@ -1617,8 +1628,15 @@ async def resume_session(
         },
     )
 
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    await _session_with_details(s)
+    s["is_paused"] = False
+    s["pause_started_at"] = None
+    s["paused_seconds"] = paused_seconds
+    s["pause_reason"] = None
+    s["current_frame"] = current_frame
+    s["table"] = await db.tables.find_one(
+        {"id": s["table_id"]},
+        {"_id": 0}
+    )
 
     return s
 
@@ -2216,7 +2234,6 @@ async def dashboard_charts(user=Depends(get_current_user)):
         {"$sort": {"qty": -1}},
         {"$limit": 5},
     ]
-    snacks_agg = await db.sessions.aggregate(pipeline).to_list(10)
     snack_sales = [{"name": x["_id"], "qty": x["qty"], "revenue": round(x["revenue"], 2)} for x in snacks_agg]
 
     # Peak hours
@@ -2226,14 +2243,26 @@ async def dashboard_charts(user=Depends(get_current_user)):
         {"$group": {"_id": "$hour", "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
-    hours_agg = await db.sessions.aggregate(pipeline2).to_list(24)
+    snacks_agg, hours_agg = await asyncio.gather(
+    db.sessions.aggregate(pipeline).to_list(10),
+    db.sessions.aggregate(pipeline2).to_list(24),
+    )
     peak = [{"hour": f"{x['_id']:02d}:00", "sessions": x["count"]} for x in hours_agg]
     return {"daily": daily, "snack_sales": snack_sales, "peak_hours": peak}
 
 @api.get("/dashboard/recent")
 async def dashboard_recent(user=Depends(get_current_user)):
-    sessions = await db.sessions.find({}, {"_id": 0}).sort("start_time", -1).limit(5).to_list(5)
-    bills = await db.sessions.find({"status": "completed"}, {"_id": 0}).sort("ended_at", -1).limit(5).to_list(5)
+    sessions, bills = await asyncio.gather(
+    db.sessions.find(
+        {},
+        {"_id": 0}
+    ).sort("start_time", -1).limit(5).to_list(5),
+
+    db.sessions.find(
+        {"status": "completed"},
+        {"_id": 0}
+    ).sort("ended_at", -1).limit(5).to_list(5),
+)
     return {"sessions": sessions, "bills": bills}
 
 # ---- Reports ----
