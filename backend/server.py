@@ -3216,9 +3216,30 @@ async def seed():
     # Indexes
     await db.expenses.create_index("date")
     await db.expenses.create_index("category")
+
     await db.payments.create_index("created_at")
     await db.payments.create_index("session_id")
+
     await db.vendors.create_index("name")
+
+    # Auth
+    await db.users.create_index("id")
+
+    # Sessions
+    await db.sessions.create_index(
+        [("status", 1), ("ended_at", -1)]
+    )
+    await db.sessions.create_index("start_time")
+    await db.sessions.create_index("table_id")
+
+    # Food orders
+    await db.food_orders.create_index(
+        [("status", 1), ("paid_at", -1)]
+    )
+
+    # Notifications
+    await db.notifications.create_index("created_at")
+    await db.notifications.create_index("read")
     
     await ensure_expense_categories()
 
