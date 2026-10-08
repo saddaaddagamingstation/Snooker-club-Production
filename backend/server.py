@@ -1233,7 +1233,28 @@ async def list_sessions(
 async def active_sessions(user=Depends(get_current_user)):
     rows = await db.sessions.find(
         {"status": "active"},
-        {"_id": 0}
+        {
+            "_id": 0,
+            "id": 1,
+            "table_id": 1,
+            "table_number": 1,
+            "customer_name": 1,
+            "start_time": 1,
+            "status": 1,
+            "is_paused": 1,
+            "pause_started_at": 1,
+            "paused_seconds": 1,
+            "pause_reason": 1,
+            "current_frame": 1,
+            "frames": 1,
+            "snacks": 1,
+            "duration_minutes": 1,
+            "table_amount": 1,
+            "discount": 1,
+            "tax_percent": 1,
+            "tax_amount": 1,
+            "grand_total": 1
+        }
     ).to_list(1000)
 
     if not rows:
@@ -1888,21 +1909,35 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         "ended_by": user["id"],
         "ended_by_name": user.get("name", ""),
     }
-    await db.sessions.update_one({"id": session_id}, {"$set": update})
-    await db.tables.update_one({"id": s["table_id"]}, {"$set": {"status": "available"}})
-    # Store payment records for reports (one per method)
-    for p in split_payments:
-        await db.payments.insert_one({
-            "id": str(uuid.uuid4()),
-            "session_id": session_id,
-            "invoice_no": invoice_no,
-            "amount": p["amount"],
-            "method": p["method"],
-            "notes": body.payment_notes or "",
-            "table_number": s["table_number"],
-            "customer_name": s.get("customer_name") or "",
-            "created_at": iso(end),
-        })
+    payment_docs = [
+    {
+        "id": str(uuid.uuid4()),
+        "session_id": session_id,
+        "invoice_no": invoice_no,
+        "amount": p["amount"],
+        "method": p["method"],
+        "notes": body.payment_notes or "",
+        "table_number": s["table_number"],
+        "customer_name": s.get("customer_name") or "",
+        "created_at": iso(end),
+    }
+    for p in split_payments
+    ]
+
+    await asyncio.gather(
+        db.sessions.update_one(
+            {"id": session_id},
+            {"$set": update}
+        ),
+        db.tables.update_one(
+            {"id": s["table_id"]},
+            {"$set": {"status": "available"}}
+        ),
+        *[
+            db.payments.insert_one(payment)
+            for payment in payment_docs
+        ],
+    )
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     await _session_with_details(s)
     await push_notification(
@@ -2234,7 +2269,6 @@ async def dashboard_charts(user=Depends(get_current_user)):
         {"$sort": {"qty": -1}},
         {"$limit": 5},
     ]
-    snack_sales = [{"name": x["_id"], "qty": x["qty"], "revenue": round(x["revenue"], 2)} for x in snacks_agg]
 
     # Peak hours
     pipeline2 = [
@@ -2247,6 +2281,7 @@ async def dashboard_charts(user=Depends(get_current_user)):
     db.sessions.aggregate(pipeline).to_list(10),
     db.sessions.aggregate(pipeline2).to_list(24),
     )
+    snack_sales = [{"name": x["_id"], "qty": x["qty"], "revenue": round(x["revenue"], 2)} for x in snacks_agg]
     peak = [{"hour": f"{x['_id']:02d}:00", "sessions": x["count"]} for x in hours_agg]
     return {"daily": daily, "snack_sales": snack_sales, "peak_hours": peak}
 
