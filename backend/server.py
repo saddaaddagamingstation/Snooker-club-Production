@@ -1156,9 +1156,37 @@ async def list_sessions(status: Optional[str] = None, user=Depends(get_current_u
 
 @api.get("/sessions/active")
 async def active_sessions(user=Depends(get_current_user)):
-    rows = await db.sessions.find({"status": "active"}, {"_id": 0}).to_list(1000)
+    rows = await db.sessions.find(
+        {"status": "active"},
+        {"_id": 0}
+    ).to_list(1000)
+
+    if not rows:
+        return []
+
+    table_ids = list({
+        r["table_id"]
+        for r in rows
+        if r.get("table_id")
+    })
+
+    tables = await db.tables.find(
+        {"id": {"$in": table_ids}},
+        {"_id": 0}
+    ).to_list(len(table_ids))
+
+    table_map = {
+        t["id"]: t
+        for t in tables
+    }
+
     for r in rows:
-        await _session_with_details(r)
+        r["table"] = table_map.get(r.get("table_id"))
+        r["snacks_total"] = sum(
+            item.get("subtotal", 0)
+            for item in r.get("snacks", [])
+        )
+
     return rows
 
 @api.get("/sessions/{session_id}")
@@ -1304,12 +1332,6 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
     await db.tables.update_one({"id": table["id"]}, {"$set": {"status": "running"}})
     session.pop("_id", None)
     await _session_with_details(session)
-    await push_notification(
-        "session_started",
-        f"Session started · Table {table['table_number']}",
-        f"{session['customer_name'] or 'Walk-in'} · @{int(session['rate_used'])}/hr · by {user.get('name','')}",
-        {"session_id": session["id"], "table_number": table["table_number"]},
-    )
     return session
 
 @api.post("/sessions/{session_id}/snacks")
@@ -1370,12 +1392,6 @@ async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depen
     await db.snacks.update_one({"id": snack["id"]}, {"$set": {"stock_quantity": new_stock}})
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     await _session_with_details(s)
-    await push_notification(
-        "snack_added",
-        f"Snack added · Table {s['table_number']}",
-        f"{item['quantity']}× {item['name']} · ₹{item['subtotal']:.2f}",
-        {"session_id": s["id"], "table_number": s["table_number"]},
-    )
     return s
 
 @api.delete("/sessions/{session_id}/snacks/{index}")

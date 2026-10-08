@@ -3,7 +3,6 @@ import { useAuth } from "@/lib/auth";
 import { LayoutDashboard, Grid3x3,Timer, UtensilsCrossed, ClipboardList, BarChart3, Users, LogOut, Menu, X, Wallet,} from "lucide-react";
 import { useState, useEffect } from "react";
 import api from "@/lib/api";
-import NotificationBell from "@/components/NotificationBell";
 
 const navItems = [
   {
@@ -230,11 +229,7 @@ export default function AppLayout() {
               {club}
             </div>
           </div>
-
-          {/* Notifications */}
-          <div className="flex items-center gap-2">
-            <NotificationBell />
-          </div>
+          <div/>
         </header>
 
         {/* Page Content */}
