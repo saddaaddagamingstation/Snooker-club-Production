@@ -1,3 +1,4 @@
+import asyncio
 from dotenv import load_dotenv
 from pathlib import Path
 from typing import Literal
@@ -1145,13 +1146,49 @@ async def start_table_from_food_order(
     return updated_session
 
 @api.get("/sessions")
-async def list_sessions(status: Optional[str] = None, user=Depends(get_current_user)):
+async def list_sessions(
+    status: Optional[str] = None,
+    user=Depends(get_current_user)
+):
     q = {}
+
     if status:
         q["status"] = status
-    rows = await db.sessions.find(q, {"_id": 0}).sort("start_time", -1).to_list(2000)
+
+    rows = await db.sessions.find(
+        q,
+        {"_id": 0}
+    ).sort(
+        "start_time",
+        -1
+    ).to_list(2000)
+
+    if not rows:
+        return []
+
+    table_ids = list({
+        r["table_id"]
+        for r in rows
+        if r.get("table_id")
+    })
+
+    tables = await db.tables.find(
+        {"id": {"$in": table_ids}},
+        {"_id": 0}
+    ).to_list(len(table_ids))
+
+    table_map = {
+        t["id"]: t
+        for t in tables
+    }
+
     for r in rows:
-        await _session_with_details(r)
+        r["table"] = table_map.get(r.get("table_id"))
+        r["snacks_total"] = sum(
+            item.get("subtotal", 0)
+            for item in r.get("snacks", [])
+        )
+
     return rows
 
 @api.get("/sessions/active")
@@ -1975,28 +2012,50 @@ async def stop_frame(session_id: str, user=Depends(require_permission("manage_se
 @api.get("/dashboard/stats")
 async def dashboard_stats(user=Depends(get_current_user)):
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    tables = await db.tables.find({}, {"_id": 0}).to_list(1000)
-    available = sum(1 for t in tables if t["status"] == "available")
-    occupied = sum(1 for t in tables if t["status"] == "running")
-    active = await db.sessions.count_documents({"status": "active"})
-    completed_today = await db.sessions.find(
-        {"status": "completed", "ended_at": {"$gte": iso(today_start)}}, {"_id": 0}
-    ).to_list(1000)
-    table_revenue_today = round(sum(
-        float(s.get("grand_total", 0))
-        for s in completed_today
-    ),
-    2
-)
-    food_orders_today = await db.food_orders.find(
-        {
-            "status": "completed",
-            "paid_at": {
-                "$gte": iso(today_start)
+    tables, active, completed_today, food_orders_today = await asyncio.gather(
+        db.tables.find(
+            {},
+            {"_id": 0, "status": 1}
+        ).to_list(1000),
+
+        db.sessions.count_documents(
+            {"status": "active"}
+        ),
+
+        db.sessions.find(
+            {
+                "status": "completed",
+                "ended_at": {"$gte": iso(today_start)}
+            },
+            {
+                "_id": 0,
+                "grand_total": 1,
+                "snacks_amount": 1
             }
-        },
-        {"_id": 0}
-    ).to_list(1000)
+        ).to_list(1000),
+
+        db.food_orders.find(
+            {
+                "status": "completed",
+                "paid_at": {"$gte": iso(today_start)}
+            },
+            {
+                "_id": 0,
+                "final_total": 1,
+                "total": 1
+            }
+        ).to_list(1000)
+    )
+
+    available = sum(
+        1 for t in tables
+        if t["status"] == "available"
+    )
+
+    occupied = sum(
+        1 for t in tables
+        if t["status"] == "running"
+    )
 
     food_only_snacks_revenue = round(
         sum(
@@ -2038,17 +2097,72 @@ async def dashboard_stats(user=Depends(get_current_user)):
 async def dashboard_charts(user=Depends(get_current_user)):
     # Daily revenue for last 7 days
     now = datetime.now(timezone.utc)
+    daily_start = (now - timedelta(days=6)).replace(
+    hour=0,
+    minute=0,
+    second=0,
+    microsecond=0
+)
+    daily_end = now + timedelta(days=1)
+
+    recent_sessions = await db.sessions.find(
+        {
+            "status": "completed",
+            "ended_at": {
+                "$gte": iso(daily_start),
+                "$lt": iso(daily_end)
+            }
+        },
+        {
+            "_id": 0,
+            "ended_at": 1,
+            "grand_total": 1
+        }
+    ).to_list(2000)
+
+    daily_map = {}
+
+    for r in recent_sessions:
+        ended_at = r.get("ended_at")
+
+        if not ended_at:
+            continue
+
+        try:
+            day_key = datetime.fromisoformat(ended_at).date()
+        except Exception:
+            continue
+
+        if day_key not in daily_map:
+            daily_map[day_key] = {
+                "revenue": 0.0,
+                "sessions": 0
+            }
+
+        daily_map[day_key]["revenue"] += float(
+            r.get("grand_total", 0)
+        )
+
+        daily_map[day_key]["sessions"] += 1
+
+
     daily = []
+
     for i in range(6, -1, -1):
-        d = (now - timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
-        d_end = d + timedelta(days=1)
-        rows = await db.sessions.find(
-            {"status": "completed", "ended_at": {"$gte": iso(d), "$lt": iso(d_end)}}, {"_id": 0}
-        ).to_list(2000)
+        d = (now - timedelta(days=i)).date()
+
+        data = daily_map.get(
+            d,
+            {
+                "revenue": 0.0,
+                "sessions": 0
+            }
+        )
+
         daily.append({
             "date": d.strftime("%a"),
-            "revenue": round(sum(r.get("grand_total", 0) for r in rows), 2),
-            "sessions": len(rows),
+            "revenue": round(data["revenue"], 2),
+            "sessions": data["sessions"]
         })
     # Snack sales — top 5
     pipeline = [
