@@ -2158,43 +2158,65 @@ async def stop_frame(session_id: str, user=Depends(require_permission("manage_se
     await _session_with_details(s)
     return s
 
+
+async def timed_dashboard_query(name, operation):
+    start = time.perf_counter()
+    try:
+        result = await operation
+        return result
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "DASHBOARD_QUERY name=%s duration_ms=%.2f",
+            name,
+            elapsed_ms,
+        )
+
+
 # ---- Dashboard ----
 @api.get("/dashboard/stats")
 async def dashboard_stats(user=Depends(get_current_user)):
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     tables, active, completed_today, food_orders_today = await asyncio.gather(
-        db.tables.find(
-            {},
-            {"_id": 0, "status": 1}
-        ).to_list(1000),
-
-        db.sessions.count_documents(
-            {"status": "active"}
+        timed_dashboard_query(
+            "tables",
+            db.tables.find(
+                {},
+                {"_id": 0, "status": 1}
+            ).to_list(1000),
         ),
-
-        db.sessions.find(
-            {
-                "status": "completed",
-                "ended_at": {"$gte": iso(today_start)}
-            },
-            {
-                "_id": 0,
-                "grand_total": 1,
-                "snacks_amount": 1
-            }
-        ).to_list(1000),
-
-        db.food_orders.find(
-            {
-                "status": "completed",
-                "paid_at": {"$gte": iso(today_start)}
-            },
-            {
-                "_id": 0,
-                "final_total": 1,
-                "total": 1
-            }
-        ).to_list(1000)
+        timed_dashboard_query(
+            "active_sessions",
+            db.sessions.count_documents({"status": "active"}),
+        ),
+        timed_dashboard_query(
+            "completed_sessions_today",
+            db.sessions.find(
+                {
+                    "status": "completed",
+                    "ended_at": {"$gte": iso(today_start)}
+                },
+                {
+                    "_id": 0,
+                    "grand_total": 1,
+                    "snacks_amount": 1
+                }
+            ).to_list(1000),
+        ),
+        timed_dashboard_query(
+            "food_orders_today",
+            db.food_orders.find(
+                {
+                    "status": "completed",
+                    "paid_at": {"$gte": iso(today_start)}
+                },
+                {
+                    "_id": 0,
+                    "final_total": 1,
+                    "total": 1
+                }
+            ).to_list(1000),
+        ),
     )
 
     table_revenue_today = round(
