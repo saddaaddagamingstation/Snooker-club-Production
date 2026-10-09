@@ -63,6 +63,36 @@ async def log_request_duration(request, call_next):
 
     return response
 
+
+@app.get("/api/diagnostics/mongodb-latency")
+async def mongodb_latency():
+    """Temporary diagnostic: measure MongoDB round-trip latency."""
+    samples = []
+
+    try:
+        for _ in range(10):
+            start = time.perf_counter()
+            await db.command("ping")
+            samples.append(round((time.perf_counter() - start) * 1000, 2))
+
+        ordered = sorted(samples)
+
+        return {
+            "samples_ms": samples,
+            "min_ms": min(samples),
+            "max_ms": max(samples),
+            "average_ms": round(sum(samples) / len(samples), 2),
+            "p95_ms": ordered[min(len(ordered) - 1, 8)],
+        }
+
+    except Exception:
+        logger.exception("MongoDB latency diagnostic failed")
+        raise HTTPException(
+            status_code=503,
+            detail="MongoDB diagnostic failed. Check Railway logs."
+        )
+
+
 # ---- Helpers ----
 def hash_password(p: str) -> str:
     return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
