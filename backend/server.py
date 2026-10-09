@@ -2283,20 +2283,23 @@ async def dashboard_charts(user=Depends(get_current_user)):
 )
     daily_end = now + timedelta(days=1)
 
-    recent_sessions = await db.sessions.find(
-        {
-            "status": "completed",
-            "ended_at": {
-                "$gte": iso(daily_start),
-                "$lt": iso(daily_end)
+    recent_sessions = await timed_dashboard_query(
+        "charts_daily_revenue",
+        db.sessions.find(
+            {
+                "status": "completed",
+                "ended_at": {
+                    "$gte": iso(daily_start),
+                    "$lt": iso(daily_end)
+                }
+            },
+            {
+                "_id": 0,
+                "ended_at": 1,
+                "grand_total": 1
             }
-        },
-        {
-            "_id": 0,
-            "ended_at": 1,
-            "grand_total": 1
-        }
-    ).to_list(2000)
+        ).to_list(2000),
+    )
 
     daily_map = {}
 
@@ -2358,10 +2361,18 @@ async def dashboard_charts(user=Depends(get_current_user)):
         {"$group": {"_id": "$hour", "count": {"$sum": 1}}},
         {"$sort": {"_id": 1}},
     ]
+    
     snacks_agg, hours_agg = await asyncio.gather(
-    db.sessions.aggregate(pipeline).to_list(10),
-    db.sessions.aggregate(pipeline2).to_list(24),
+        timed_dashboard_query(
+            "charts_snack_sales",
+            db.sessions.aggregate(pipeline).to_list(10),
+        ),
+        timed_dashboard_query(
+            "charts_peak_hours",
+            db.sessions.aggregate(pipeline2).to_list(24),
+        ),
     )
+
     snack_sales = [{"name": x["_id"], "qty": x["qty"], "revenue": round(x["revenue"], 2)} for x in snacks_agg]
     peak = [{"hour": f"{x['_id']:02d}:00", "sessions": x["count"]} for x in hours_agg]
     return {"daily": daily, "snack_sales": snack_sales, "peak_hours": peak}
