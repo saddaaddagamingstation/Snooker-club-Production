@@ -39,6 +39,12 @@ import time
 
 logger = logging.getLogger("api_timing")
 
+async def ensure_performance_indexes():
+    await db.sessions.create_index(
+        [("status", 1), ("start_time", 1)],
+        name="idx_sessions_status_start_time",
+    )
+
 @app.middleware("http")
 async def log_request_duration(request, call_next):
     start = time.perf_counter()
@@ -3432,13 +3438,14 @@ logger = logging.getLogger(__name__)
 async def seed():
     await db.users.create_index("email", unique=True)
     await db.tables.create_index("table_number", unique=True)
+    await db.tables.create_index("id", unique=True)
     await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
 
     admin_email = os.environ.get("ADMIN_EMAIL", "supremepoolandsnooker@gmail.com")
     admin_pw = os.environ.get("ADMIN_PASSWORD", "SupremeSnookerClub2ndfloor")
     if not await db.users.find_one({"email": admin_email}):
         await db.users.insert_one({
-            "id": str(uuid.uuid4()),
+            "id": str(uuid.uuid4()),    
             "name": "Admin",
             "email": admin_email,
             "password_hash": hash_password(admin_pw),
@@ -3537,6 +3544,7 @@ async def seed():
 @app.on_event("startup")
 async def on_startup():
     await seed()
+    await ensure_performance_indexes()
 
 @app.on_event("shutdown")
 async def on_shutdown():

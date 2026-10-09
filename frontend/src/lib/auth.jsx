@@ -24,20 +24,19 @@ export function AuthProvider({ children }) {
   // Refresh permissions when the user returns to the app.
   useEffect(() => {
     const onFocus = () => {
-      if (localStorage.getItem("snk_token")) {
+      if (document.visibilityState === "visible" && localStorage.getItem("snk_token")) {
         refresh();
       }
     };
 
-    window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onFocus);
 
     return () => {
-      window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
     };
   }, [refresh]);
 
+  
   const login = async (email, password, remember) => {
     try {
       const { data } = await api.post("/auth/login", { email, password });

@@ -234,7 +234,8 @@ export default function Sessions() {
         toast.success("Session paused");
       }
 
-      await load();
+      const { data } = await api.get("/sessions/active");
+      setSessions(data);
     } catch (e) {
       toast.error(formatApiErrorDetail(e.response?.data?.detail));
     }
