@@ -34,6 +34,29 @@ app = FastAPI(title="Supreme Snooker Club API")
 api = APIRouter(prefix="/api")
 security = HTTPBearer(auto_error=False)
 
+import logging
+import time
+
+logger = logging.getLogger("api_timing")
+
+@app.middleware("http")
+async def log_request_duration(request, call_next):
+    start = time.perf_counter()
+
+    response = await call_next(request)
+
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    logger.info(
+        "API_TIMING method=%s path=%s status=%s duration_ms=%.2f",
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
+
+    return response
+
 # ---- Helpers ----
 def hash_password(p: str) -> str:
     return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
