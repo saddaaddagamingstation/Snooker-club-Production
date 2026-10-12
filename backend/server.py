@@ -556,44 +556,6 @@ def require_permission(perm: str):
         return user
     return _dep
 
-# ---- Notifications ----
-BIG_BILL_THRESHOLD = 1000.0
-
-async def push_notification(kind: str, title: str, body: str, meta: Optional[dict] = None):
-    doc = {
-        "id": str(uuid.uuid4()),
-        "kind": kind,  # session_started | session_ended | snack_added | big_bill
-        "title": title,
-        "body": body,
-        "meta": meta or {},
-        "read": False,
-        "created_at": iso(now_utc()),
-    }
-    await db.notifications.insert_one(doc.copy())
-    # Keep only last 200
-    total = await db.notifications.count_documents({})
-    if total > 200:
-        excess = total - 200
-        old = await db.notifications.find({}, {"_id": 1}).sort("created_at", 1).limit(excess).to_list(excess)
-        if old:
-            await db.notifications.delete_many({"_id": {"$in": [o["_id"] for o in old]}})
-
-@api.get("/notifications")
-async def list_notifications(user=Depends(get_current_user)):
-    rows = await db.notifications.find({}, {"_id": 0}).sort("created_at", -1).limit(30).to_list(30)
-    unread = await db.notifications.count_documents({"read": False})
-    return {"notifications": rows, "unread": unread}
-
-@api.post("/notifications/read-all")
-async def mark_all_read(user=Depends(get_current_user)):
-    await db.notifications.update_many({"read": False}, {"$set": {"read": True}})
-    return {"ok": True}
-
-@api.post("/notifications/{notif_id}/read")
-async def mark_read(notif_id: str, user=Depends(get_current_user)):
-    await db.notifications.update_one({"id": notif_id}, {"$set": {"read": True}})
-    return {"ok": True}
-
 # ---- Auth Routes ----
 @api.post("/auth/login")
 async def login(req: LoginReq):
@@ -1398,13 +1360,6 @@ async def clear_session(
     )
 
     # -----------------------------------------
-    # 3. Delete notifications related to session
-    # -----------------------------------------
-    await db.notifications.delete_many({
-        "meta.session_id": session_id
-    })
-
-    # -----------------------------------------
     # 4. Delete any payment records if they exist
     # -----------------------------------------
     await db.payments.delete_many({
@@ -1999,20 +1954,6 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
     )
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     await _session_with_details(s)
-    await push_notification(
-        "session_ended",
-        f"Bill generated · {invoice_no}",
-        f"Table {s['table_number']} · {duration_minutes} min · ₹{grand_total:.2f} · {payment_method.upper()}",
-        {"session_id": s["id"], "table_number": s["table_number"], "grand_total": grand_total, "invoice_no": invoice_no, "payment_method": payment_method},
-    )
-    if grand_total >= BIG_BILL_THRESHOLD:
-        await push_notification(
-            "big_bill",
-            f"Big bill raised · ₹{grand_total:.2f}",
-            f"Table {s['table_number']} · {s.get('customer_name') or 'Walk-in'} · Invoice {invoice_no}",
-            {"session_id": s["id"], "grand_total": grand_total},
-        )
-    return s
 
 # ---- Frames ----
 @api.post("/sessions/{session_id}/frames/start")
@@ -3567,11 +3508,7 @@ async def seed():
     await db.food_orders.create_index(
         [("status", 1), ("paid_at", -1)]
     )
-
-    # Notifications
-    await db.notifications.create_index("created_at")
-    await db.notifications.create_index("read")
-    
+ 
     await ensure_expense_categories()
 
     if await db.tables.count_documents({}) == 0:

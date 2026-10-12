@@ -1,63 +1,134 @@
-import { createContext, useContext, useEffect, useState, useCallback } from "react";
-import api, { formatApiErrorDetail } from "./api";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+} from "react";
+
+import api, {
+  formatApiErrorDetail,
+  getStoredToken,
+  clearStoredToken,
+  storeToken,
+} from "./api";
 
 const AuthContext = createContext(null);
 
 const ADMIN_PERMS = {
-  manage_tables: true, manage_snacks: true, manage_sessions: true,
-  manage_expenses: true, view_expenses: true, view_revenue: true, view_profit: true,
-  view_reports: true, manage_users: true, manage_settings: true,
+  manage_tables: true,
+  manage_snacks: true,
+  manage_sessions: true,
+  manage_expenses: true,
+  view_expenses: true,
+  view_revenue: true,
+  view_profit: true,
+  view_reports: true,
+  manage_users: true,
+  manage_settings: true,
 };
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(undefined);
 
-  const refresh = useCallback(async () => {
-    const token = localStorage.getItem("snk_token");
-    if (!token) { setUser(null); return; }
-    try { const { data } = await api.get("/auth/me"); setUser(data); }
-    catch { localStorage.removeItem("snk_token"); setUser(null); }
+  const logout = useCallback(() => {
+    clearStoredToken();
+    setUser(null);
   }, []);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  const refresh = useCallback(async () => {
+    const token = getStoredToken();
 
-  // Refresh permissions when the user returns to the app.
+    if (!token) {
+      setUser(null);
+      return false;
+    }
+
+    try {
+      const { data } = await api.get("/auth/me");
+      setUser(data);
+      return true;
+    } catch (error) {
+      // Clear credentials only when the backend rejects the token.
+      if (error.response?.status === 401) {
+        clearStoredToken();
+        setUser(null);
+      }
+
+      // Network errors and 5xx errors do not clear the login.
+      return false;
+    }
+  }, []);
+
   useEffect(() => {
-    const onFocus = () => {
-      if (document.visibilityState === "visible" && localStorage.getItem("snk_token")) {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (
+        document.visibilityState === "visible" &&
+        getStoredToken()
+      ) {
         refresh();
       }
     };
 
-    document.addEventListener("visibilitychange", onFocus);
+    document.addEventListener(
+      "visibilitychange",
+      onVisibilityChange
+    );
 
     return () => {
-      document.removeEventListener("visibilitychange", onFocus);
+      document.removeEventListener(
+        "visibilitychange",
+        onVisibilityChange
+      );
     };
   }, [refresh]);
 
-  
-  const login = async (email, password, remember) => {
+  const login = async (email, password, remember = true) => {
     try {
-      const { data } = await api.post("/auth/login", { email, password });
-      localStorage.setItem("snk_token", data.access_token);
-      if (!remember) sessionStorage.setItem("snk_session_only", "1");
+      const { data } = await api.post("/auth/login", {
+        email,
+        password,
+      });
+
+      storeToken(data.access_token, remember);
       setUser(data.user);
+
       return { ok: true };
-    } catch (e) {
-      return { ok: false, error: formatApiErrorDetail(e.response?.data?.detail) || e.message };
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          formatApiErrorDetail(error.response?.data?.detail) ||
+          error.message,
+      };
     }
   };
-
-  const logout = () => { localStorage.removeItem("snk_token"); setUser(null); };
 
   const can = (perm) => {
     if (!user) return false;
     if (user.role === "admin") return true;
+
     return !!(user.permissions || {})[perm];
   };
 
-  return <AuthContext.Provider value={{ user, login, logout, setUser, can, refresh }}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider
+      value={{
+        user,
+        login,
+        logout,
+        setUser,
+        can,
+        refresh,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
 export const useAuth = () => useContext(AuthContext);
