@@ -1270,6 +1270,7 @@ async def active_sessions(user=Depends(get_current_user)):
             "frames": 1,
             "snacks": 1,
             "duration_minutes": 1,
+            "rate_used": 1,
             "table_amount": 1,
             "discount": 1,
             "tax_percent": 1,
@@ -1296,15 +1297,52 @@ async def active_sessions(user=Depends(get_current_user)):
         t["id"]: t
         for t in tables
     }
-
+    
     for r in rows:
         r["table"] = table_map.get(r.get("table_id"))
         r["snacks_total"] = sum(
-            item.get("subtotal", 0)
+            float(item.get("subtotal", 0))
             for item in r.get("snacks", [])
         )
 
+        rate = float(r.get("rate_used", 0))
+        frames = r.get("frames") or []
+        table_amount = sum(
+            float(frame.get("amount", 0))
+            for frame in frames
+        )
+
+        current_frame = r.get("current_frame")
+        if current_frame and current_frame.get("start_time"):
+            now = now_utc()
+            frame_start = datetime.fromisoformat(
+                current_frame["start_time"]
+            )
+            frame_paused_seconds = float(
+                current_frame.get("paused_seconds", 0)
+            )
+
+            current_pause_seconds = 0
+            if r.get("is_paused") and r.get("pause_started_at"):
+                current_pause_seconds = (
+                    now - datetime.fromisoformat(
+                        r["pause_started_at"]
+                    )
+                ).total_seconds()
+
+            elapsed_seconds = max(
+                0,
+                (now - frame_start).total_seconds()
+                - frame_paused_seconds
+                - current_pause_seconds
+            )
+
+            table_amount += (elapsed_seconds / 3600) * rate
+
+        r["table_amount"] = round(table_amount, 2)
+
     return rows
+
 
 @api.get("/sessions/{session_id}")
 async def get_session(session_id: str, user=Depends(get_current_user)):
@@ -1915,6 +1953,8 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         "grand_total": grand_total,
         "grand_total_exact": grand_total_exact,
         "status": "completed",
+        "frames": frames,
+        "current_frame": None,
         "invoice_no": invoice_no,
         "ended_at": iso(end),
         "payment_method": primary_method,
@@ -1952,8 +1992,12 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
             for payment in payment_docs
         ],
     )
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    s = await db.sessions.find_one(
+        {"id": session_id},
+        {"_id": 0}
+    )
     await _session_with_details(s)
+    return s
 
 # ---- Frames ----
 @api.post("/sessions/{session_id}/frames/start")
