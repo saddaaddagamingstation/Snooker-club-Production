@@ -1806,7 +1806,14 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
     "table_amount_raw": table_amount_raw,
 })
     table_amount = round(table_amount_raw, 2)
-    snacks_amount = float(s.get("snacks_amount", 0))
+    # Calculate snack amount directly from the actual session items
+    snacks_amount = round(
+        sum(
+            float(item.get("subtotal", float(item.get("price", 0)) * int(item.get("quantity", 0))))
+            for item in s.get("snacks", [])
+        ),
+        2,
+    )
     grand_total_exact = round(table_amount + snacks_amount, 2)
     grand_total = int(round(grand_total_exact))
     await _session_with_details(s)
@@ -1917,7 +1924,13 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         raise HTTPException(status_code=400, detail=f"Invalid payment_method. Allowed: {', '.join(PAYMENT_METHODS)}")
     # Use freeze_snapshot from the modal if provided; otherwise compute fresh from now.
 
-    snacks_amount = float(s.get("snacks_amount", 0))
+    snacks_amount = round(
+    sum(
+        float(item.get("subtotal", float(item.get("price", 0)) * int(item.get("quantity", 0))))
+        for item in s.get("snacks", [])
+    ),
+    2,
+    )
     discount = float(body.discount or 0)
     tax_percent = float(body.tax_percent or 0)
     subtotal = table_amount + snacks_amount - discount

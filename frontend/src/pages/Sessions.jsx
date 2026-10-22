@@ -418,7 +418,14 @@ export default function Sessions() {
             s.pause_started_at,
           );
           const tableAmount = e.tableAmount;
-          const snacksAmount = s.snacks_amount || 0;
+          const snacksAmount = (s.snacks || []).reduce((total, item) =>
+            total +
+            Number(
+              item.subtotal ??
+              (Number(item.price || 0) * Number(item.quantity || 0))
+            ),
+          0
+        );
           const bill = tableAmount + snacksAmount;
           return (
             <div
