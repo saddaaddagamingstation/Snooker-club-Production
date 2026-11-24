@@ -8,6 +8,7 @@ const PERMISSION_LABELS = {
   manage_tables: { label: "Manage Tables", desc: "Add, edit and delete snooker tables" },
   manage_snacks: { label: "Manage Snacks", desc: "Add, edit and delete snacks/drinks catalog" },
   manage_sessions: { label: "View Sessions", desc: "Start, end sessions & add snacks / frames" },
+  clear_session: { label: "Clear Session",desc: "Allow staff to permanently clear active sessions and their details"},
   manage_expenses: { label: "Manage Expenses", desc: "Create, edit expenses, vendors and recurring items" },
   view_expenses: { label: "View Expenses", desc: "See the expense list and expense reports" },
   view_revenue: { label: "View Revenue", desc: "See revenue KPIs and payment reports" },

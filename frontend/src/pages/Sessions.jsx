@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useAuth } from "@/lib/auth";
 import api, { inr, inrRounded, formatApiErrorDetail } from "@/lib/api";
 import {
   Clock,
@@ -159,6 +160,7 @@ function EndFrameModal({ current, onClose, onEnd }) {
 
 export default function Sessions() {
   const [sessions, setSessions] = useState([]);
+  const { can } = useAuth();
   const [snacks, setSnacks] = useState([]);
   const [, setTick] = useState(0);
   const [addSnack, setAddSnack] = useState(null); // session
@@ -418,14 +420,15 @@ export default function Sessions() {
             s.pause_started_at,
           );
           const tableAmount = e.tableAmount;
-          const snacksAmount = (s.snacks || []).reduce((total, item) =>
-            total +
-            Number(
-              item.subtotal ??
-              (Number(item.price || 0) * Number(item.quantity || 0))
-            ),
-          0
-        );
+          const snacksAmount = (s.snacks || []).reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.subtotal ??
+                  Number(item.price || 0) * Number(item.quantity || 0),
+              ),
+            0,
+          );
           const bill = tableAmount + snacksAmount;
           return (
             <div
@@ -566,14 +569,16 @@ export default function Sessions() {
                   )}
                 </button>
 
-                <button
-                  onClick={() => setClearSessionTarget(s)}
-                  data-testid={`clear-session-${s.table_number}`}
-                  className="flex-1 h-11 rounded-xl bg-gray-500/10 hover:bg-gray-500/20 border border-gray-500/30 text-gray-300 hover:text-white font-semibold flex items-center justify-center gap-2"
-                >
-                  <Trash2 className="w-4 h-4" />
-                  Clear
-                </button>
+                {can("clear_session") && (
+                  <button
+                    onClick={() => setClearSessionTarget(s)}
+                    data-testid={`clear-session-${s.table_number}`}
+                    className="flex-1 h-11 rounded-xl bg-gray-500/10 hover:bg-gray-500/20 border border-gray-500/30 text-gray-300 hover:text-white font-semibold flex items-center justify-center gap-2"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Clear
+                  </button>
+                )}
 
                 <button
                   onClick={async () => {
@@ -1119,9 +1124,9 @@ function EndForm({ session, snapshot, onSubmit }) {
   ];
 
   const enteredTotal = Object.values(amounts).reduce(
-  (s, v) => s + Number(v || 0),
-  0,
-);
+    (s, v) => s + Number(v || 0),
+    0,
+  );
 
   const remaining = total - enteredTotal;
 

@@ -5,7 +5,6 @@ import {
   useState,
   useCallback,
 } from "react";
-
 import api, {
   formatApiErrorDetail,
   getStoredToken,
@@ -26,14 +25,17 @@ const ADMIN_PERMS = {
   view_reports: true,
   manage_users: true,
   manage_settings: true,
+  clear_session: true,
 };
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(undefined);
+  const [authStatus, setAuthStatus] = useState("checking");
 
   const logout = useCallback(() => {
     clearStoredToken();
     setUser(null);
+    setAuthStatus("unauthenticated");
   }, []);
 
   const refresh = useCallback(async () => {
@@ -41,49 +43,55 @@ export function AuthProvider({ children }) {
 
     if (!token) {
       setUser(null);
+      setAuthStatus("unauthenticated");
       return false;
     }
 
+    // Retry an unavailable initial authentication check.
+    // Don't interrupt an already authenticated user during background refresh.
+    setAuthStatus((current) =>
+      current === "unavailable" ? "checking" : current,
+    );
+
     try {
       const { data } = await api.get("/auth/me");
+
       setUser(data);
+      setAuthStatus("authenticated");
+
       return true;
     } catch (error) {
-      // Clear credentials only when the backend rejects the token.
       if (error.response?.status === 401) {
         clearStoredToken();
         setUser(null);
+        setAuthStatus("unauthenticated");
+      } else {
+        setAuthStatus((current) =>
+          current === "checking" ? "unavailable" : current,
+        );
       }
 
-      // Network errors and 5xx errors do not clear the login.
       return false;
     }
   }, []);
 
+  // Run authentication check when the app starts
   useEffect(() => {
     refresh();
   }, [refresh]);
 
+  // Recheck authentication when the user returns to the app
   useEffect(() => {
     const onVisibilityChange = () => {
-      if (
-        document.visibilityState === "visible" &&
-        getStoredToken()
-      ) {
+      if (document.visibilityState === "visible" && getStoredToken()) {
         refresh();
       }
     };
 
-    document.addEventListener(
-      "visibilitychange",
-      onVisibilityChange
-    );
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
-      document.removeEventListener(
-        "visibilitychange",
-        onVisibilityChange
-      );
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [refresh]);
 
@@ -96,14 +104,14 @@ export function AuthProvider({ children }) {
 
       storeToken(data.access_token, remember);
       setUser(data.user);
+      setAuthStatus("authenticated");
 
       return { ok: true };
     } catch (error) {
       return {
         ok: false,
         error:
-          formatApiErrorDetail(error.response?.data?.detail) ||
-          error.message,
+          formatApiErrorDetail(error.response?.data?.detail) || error.message,
       };
     }
   };
@@ -117,14 +125,7 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider
-      value={{
-        user,
-        login,
-        logout,
-        setUser,
-        can,
-        refresh,
-      }}
+      value={{ user, authStatus, login, logout, setUser, can, refresh }}
     >
       {children}
     </AuthContext.Provider>

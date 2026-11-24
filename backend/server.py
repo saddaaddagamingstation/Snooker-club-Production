@@ -534,6 +534,7 @@ DEFAULT_STAFF_PERMISSIONS = {
     "manage_tables": False,
     "manage_snacks": False,
     "manage_sessions": True,
+    "clear_session": False,  #New
     "manage_expenses": False,
     "view_expenses": False,
     "view_revenue": False,
@@ -1357,6 +1358,12 @@ async def clear_session(
     session_id: str,
     user=Depends(require_permission("manage_sessions"))
 ):
+    # Separate permission required to permanently clear sessions
+    if not has_permission(user, "clear_session"):
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to clear sessions"
+        )
     # Find the session
     s = await db.sessions.find_one(
         {"id": session_id},
@@ -2538,7 +2545,7 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
 
         snack_list = []
         total_qty = 0
-        total_revenue = 0
+        snack_detail_revenue = 0
 
         for item in snacks:
             quantity = int(item.get("quantity", 0))
@@ -2550,7 +2557,7 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
             })
 
             total_qty += quantity
-            total_revenue += revenue
+            snack_detail_revenue += revenue
 
         snack_details.append({
             "source": "table",
@@ -2558,7 +2565,7 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
             "customer_name": s.get("customer_name", ""),
             "snacks": snack_list,
             "total_qty": total_qty,
-            "revenue": round(total_revenue, 2),
+            "revenue": round(snack_detail_revenue, 2),
             "sold_at": s.get(
                 "ended_at",
                 s.get("start_time", "")
@@ -2575,7 +2582,6 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
 
         snack_list = []
         total_qty = 0
-        total_revenue = 0
 
         for item in items:
             quantity = int(item.get("quantity", 0))
@@ -2587,7 +2593,7 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
             })
 
             total_qty += quantity
-            total_revenue += revenue
+            snack_detail_revenue += revenue
 
         snack_details.append({
             "source": "food_only",
@@ -2595,7 +2601,7 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
             "customer_name": order.get("customer_name", ""),
             "snacks": snack_list,
             "total_qty": total_qty,
-            "revenue": round(total_revenue, 2),
+            "revenue": round(snack_detail_revenue, 2),
             "sold_at": order.get(
                 "paid_at",
                 order.get("created_at", "")

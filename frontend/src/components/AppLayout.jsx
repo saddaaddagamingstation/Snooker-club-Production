@@ -1,8 +1,22 @@
 import { Outlet, NavLink, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { LayoutDashboard, Grid3x3,Timer, UtensilsCrossed, ClipboardList, BarChart3, Users, LogOut, Menu, X, Wallet,} from "lucide-react";
+import {
+  LayoutDashboard,
+  Grid3x3,
+  Timer,
+  UtensilsCrossed,
+  ClipboardList,
+  BarChart3,
+  Users,
+  LogOut,
+  Menu,
+  X,
+  Wallet,
+} from "lucide-react";
 import { useState, useEffect } from "react";
 import api from "@/lib/api";
+import PageSkeleton from "@/components/states/PageSkeleton";
+import { Suspense } from "react";
 
 const navItems = [
   {
@@ -99,12 +113,12 @@ export default function AppLayout() {
           className="p-4 flex items-center gap-3 border-b border-[#1c1c1c] cursor-pointer hover:bg-[#111111] transition-colors"
         >
           <div className="relative w-9 h-9 rounded-full bg-white flex items-center justify-center shadow-[0_0_18px_rgba(21,128,61,0.4)] shrink-0">
-  <img
-    src="logo.png"
-    alt="Cue Ops"
-    className="w-7 h-7 object-contain"
-  />
-</div>
+            <img
+              src="logo.png"
+              alt="Cue Ops"
+              className="w-7 h-7 object-contain"
+            />
+          </div>
 
           <div className="min-w-0">
             <div className="text-[25px] uppercase tracking-[0.05em] text-white font-bold">
@@ -132,10 +146,7 @@ export default function AppLayout() {
                 }`
               }
             >
-              <Icon
-                aria-hidden="true"
-                className="w-5 h-5 shrink-0"
-              />
+              <Icon aria-hidden="true" className="w-5 h-5 shrink-0" />
 
               <span>{label}</span>
             </NavLink>
@@ -168,10 +179,7 @@ export default function AppLayout() {
             onClick={handleLogout}
             className="w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg bg-[#1c1c1c] hover:bg-red-900/30 hover:text-red-300 text-gray-300 text-sm font-medium transition-all border border-[#262626] hover:border-red-900/50"
           >
-            <LogOut
-              aria-hidden="true"
-              className="w-4 h-4"
-            />
+            <LogOut aria-hidden="true" className="w-4 h-4" />
 
             <span>Sign out</span>
           </button>
@@ -207,15 +215,9 @@ export default function AppLayout() {
               className="lg:hidden p-2 rounded-lg bg-[#141414] border border-[#262626] hover:bg-[#1c1c1c] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0A0A0A]"
             >
               {open ? (
-                <X
-                  aria-hidden="true"
-                  className="w-5 h-5"
-                />
+                <X aria-hidden="true" className="w-5 h-5" />
               ) : (
-                <Menu
-                  aria-hidden="true"
-                  className="w-5 h-5"
-                />
+                <Menu aria-hidden="true" className="w-5 h-5" />
               )}
             </button>
           </div>
@@ -229,7 +231,7 @@ export default function AppLayout() {
               {club}
             </div>
           </div>
-          <div/>
+          <div />
         </header>
 
         {/* Page Content */}
@@ -237,7 +239,9 @@ export default function AppLayout() {
           id="main-content"
           className="flex-1 p-4 sm:p-6 lg:p-10 max-w-[1600px] w-full mx-auto"
         >
-          <Outlet />
+          <Suspense fallback={<PageSkeleton />}>
+            <Outlet />
+          </Suspense>
         </main>
       </div>
     </div>

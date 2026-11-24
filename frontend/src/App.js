@@ -1,6 +1,8 @@
 import "@/App.css";
 import "@/index.css";
-import { lazy, Suspense } from "react";
+import { lazy } from "react";
+import AppLoadingScreen from "@/components/states/AppLoadingScreen";
+import PageState from "@/components/states/PageState";
 import {
   BrowserRouter,
   Routes,
@@ -26,33 +28,39 @@ const Staff = lazy(() => import("@/pages/Staff"));
 const Bill = lazy(() => import("@/pages/Bill"));
 
 function Protected({ children, perm }) {
-  const { user, can } = useAuth();
+  const { user, authStatus, can, refresh } = useAuth();
 
-  if (user === undefined) {
+  // Initial authentication check
+  if (authStatus === "checking") {
+    return <AppLoadingScreen />;
+  }
+
+  // Backend unavailable or network failure
+  if (authStatus === "unavailable") {
     return (
-      <div className="min-h-screen flex items-center justify-center text-gray-400">
-        Loading…
+      <div className="min-h-screen flex items-center justify-center bg-[#0A0A0A]">
+        <PageState
+          type="error"
+          title="Unable to connect"
+          description="We couldn't verify your login. Check your internet connection and try again."
+          onRetry={refresh}
+          actionLabel="Retry connection"
+        />
       </div>
     );
   }
 
+  // User is not logged in
   if (!user) {
     return <Navigate to="/login" replace />;
   }
 
+  // Permission check
   if (perm && !can(perm)) {
     return <Navigate to="/dashboard" replace />;
   }
 
   return children;
-}
-
-function PageLoader() {
-  return (
-    <div className="min-h-screen flex items-center justify-center text-gray-400">
-      Loading…
-    </div>
-  );
 }
 
 export default function App() {
@@ -66,7 +74,7 @@ export default function App() {
           closeButton
         />
 
-        <Suspense fallback={<PageLoader />}>
+  
           <Routes>
             <Route path="/login" element={<Login />} />
 
@@ -149,7 +157,6 @@ export default function App() {
               element={<Navigate to="/dashboard" replace />}
             />
           </Routes>
-        </Suspense>
       </BrowserRouter>
     </AuthProvider>
   );
