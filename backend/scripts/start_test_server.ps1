@@ -16,10 +16,10 @@ if ($dbName -notmatch '(?i)(^|[_-])test($|[_-])') {
 if ($env:JWT_SECRET.Length -lt 32) {
     throw 'Refusing to start: use a unique test JWT_SECRET of at least 32 characters.'
 }
-if ($env:ADMIN_PASSWORD -eq 'SupremeSnookerClub2ndfloor' -or $env:STAFF_PASSWORD -eq 'staff123') {
+if ($env:ADMIN_PASSWORD -eq '0nv821bhx79qf' -or $env:STAFF_PASSWORD -eq 'staff123') {
     throw 'Refusing to start with the source-code default seed passwords. Set unique test-only passwords.'
 }
-if ($env:ADMIN_EMAIL -eq 'supremepoolandsnooker@gmail.com' -or $env:STAFF_EMAIL -eq 'staff@snooker.com') {
+if ($env:ADMIN_EMAIL -eq 'Saddaaddagamingstation@gmail.com' -or $env:STAFF_EMAIL -eq 'staff@snooker.com') {
     throw 'Refusing to start with the source-code default seed emails. Set unique test-only emails.'
 }
 if ($env:MONGO_URL -notmatch '^mongodb(\+srv)?://') {

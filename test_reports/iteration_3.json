@@ -25,7 +25,7 @@
   ],
   "updated_files": ["/app/backend/tests/backend_test.py"],
   "success_rate": {"backend": "100%", "frontend": "0%"},
-  "test_credentials": "supremepoolandsnooker@gmail.com/SupremeSnookerClub2ndfloor, staff@snooker.com/staff123",
+  "test_credentials": "Saddaaddagamingstation@gmail.com/0nv821bhx79qf, staff@snooker.com/staff123",
   "seed_data_creation": "Started 2 test sessions via UI to trigger the bug; cleaned up via API POST /sessions/{id}/end.",
   "retest_needed": true,
   "main_agent_can_self_test": true,

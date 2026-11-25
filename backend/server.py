@@ -28,9 +28,9 @@ db = client[os.environ['DB_NAME']]
 
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALG = "HS256"
-CLUB_NAME = os.environ.get('CLUB_NAME', 'Supreme Snooker Club')
+CLUB_NAME = os.environ.get('CLUB_NAME', 'Sadda Adda Snooker')
 
-app = FastAPI(title="Supreme Snooker Club API")
+app = FastAPI(title="Sadda Adda Snooker API")
 api = APIRouter(prefix="/api")
 security = HTTPBearer(auto_error=False)
 
@@ -3486,7 +3486,7 @@ async def club_info():
 
 @api.get("/")
 async def root():
-    return {"message": "Supreme Snooker Club API", "club": CLUB_NAME}
+    return {"message": "Sadda Adda Snooker API", "club": CLUB_NAME}
 
 app.include_router(api)
 
@@ -3508,8 +3508,8 @@ async def seed():
     await db.tables.create_index("id", unique=True)
     await db.password_resets.create_index("expires_at", expireAfterSeconds=0)
 
-    admin_email = os.environ.get("ADMIN_EMAIL", "supremepoolandsnooker@gmail.com")
-    admin_pw = os.environ.get("ADMIN_PASSWORD", "SupremeSnookerClub2ndfloor")
+    admin_email = os.environ.get("ADMIN_EMAIL", "Saddaaddagamingstation@gmail.com")
+    admin_pw = os.environ.get("ADMIN_PASSWORD", "0nv821bhx79qf")
     if not await db.users.find_one({"email": admin_email}):
         await db.users.insert_one({
             "id": str(uuid.uuid4()),    

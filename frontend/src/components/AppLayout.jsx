@@ -74,7 +74,7 @@ export default function AppLayout() {
   const navigate = useNavigate();
 
   const [open, setOpen] = useState(false);
-  const [club, setClub] = useState("Supreme Snooker");
+  const [club, setClub] = useState("Sadda Adda Snooker");
 
   useEffect(() => {
     api

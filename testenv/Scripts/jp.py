@@ -1,4 +1,4 @@
-#!D:\Testing\Snooker Software\SupremeSnooker-Club\testenv\Scripts\python.exe
+#!D:\Testing\Snooker Software\Sadda Adda Snooker\testenv\Scripts\python.exe
 
 import sys
 import json

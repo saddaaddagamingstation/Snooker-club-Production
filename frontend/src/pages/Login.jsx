@@ -54,7 +54,7 @@ export default function Login() {
               <Circle className="w-6 h-6 fill-white/20" />
             </div>
             <div>
-              <div className="text-xs uppercase tracking-[0.3em] text-green-400 font-bold">Supreme Snooker</div>
+              <div className="text-xs uppercase tracking-[0.3em] text-green-400 font-bold">Sadda Adda Snooker</div>
               <div className="text-xl font-bold tracking-tight">Snooker Management Suite</div>
             </div>
           </div>
@@ -76,7 +76,7 @@ export default function Login() {
             <div className="w-10 h-10 rounded-full bg-green-700 flex items-center justify-center">
               <Circle className="w-5 h-5 fill-white/20" />
             </div>
-            <div className="text-lg font-bold">Supreme Snooker</div>
+            <div className="text-lg font-bold">Sadda Adda Snooker</div>
           </div>
           <div className="text-xs uppercase tracking-[0.25em] text-green-500 font-bold mb-3">Welcome back</div>
           <h2 className="text-3xl sm:text-4xl font-bold tracking-tight mb-2">Sign in to your club</h2>

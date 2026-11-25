@@ -14,7 +14,7 @@ export default function Bill() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [s, setS] = useState(null);
-  const [club, setClub] = useState("Supreme Snooker");
+  const [club, setClub] = useState("Sadda Adda Snooker");
   const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
   const [customerPhone, setCustomerPhone] = useState("");
 

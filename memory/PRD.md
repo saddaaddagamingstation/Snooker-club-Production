@@ -10,7 +10,7 @@ Complete responsive Snooker Club Management System web app with modern dark UI, 
 - Design: dark theme, black + dark gray + green accents (Manrope/Figtree/JetBrains Mono)
 
 ## User Personas
-- **Admin** (supremepoolandsnooker@gmail.com / SupremeSnookerClub2ndfloor): full control including staff & permissions
+- **Admin** (Saddaaddagamingstation@gmail.com / 0nv821bhx79qf): full control including staff & permissions
 - **Staff** (staff@snooker.com / staff123): default permission = manage_sessions only; other perms toggled by admin
 
 ## Permission Keys

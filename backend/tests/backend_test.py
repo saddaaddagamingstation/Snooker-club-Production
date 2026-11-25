@@ -1,4 +1,4 @@
-"""Supreme Snooker Club Backend Tests - covers auth, tables, snacks, sessions, dashboard, reports, users."""
+"""Sadda Adda Snooker Backend Tests - covers auth, tables, snacks, sessions, dashboard, reports, users."""
 import os
 import re
 import time
