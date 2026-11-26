@@ -158,6 +158,33 @@ function EndFrameModal({ current, onClose, onEnd }) {
   );
 }
 
+function countdownColor(session) {
+  if (!session) return null;
+  let total = 0;
+  let remaining = 0;
+  if (session.billing_type === "membership" && session.membership_state) {
+    total = Number(session.membership_state.daily_minutes || 0) * 60;
+    const liveElapsed = !session.is_paused && session.membership_state.as_of
+      ? Math.max(0, (Date.now() - new Date(session.membership_state.as_of).getTime()) / 1000) : 0;
+    remaining = Math.max(0, Number(session.membership_state.remaining_seconds_today || 0) - liveElapsed);
+  } else if (session.timer_mode === "countdown") {
+    const segs = session.game_billing_segments || [];
+    const last = [...segs].reverse().find((x) => x.kind === "fixed");
+    total = Number(last?.duration_seconds || Number(last?.duration_minutes || 0) * 60);
+    const liveElapsed = !session.is_paused && session.timer_started_at
+      ? Math.max(0, (Date.now() - new Date(session.timer_started_at).getTime()) / 1000) : 0;
+    remaining = Math.max(0, Number(session.timer_remaining_seconds || 0) - liveElapsed);
+  } else return null;
+  if (!total) return null;
+  const elapsedSeconds = Math.max(0, total - remaining);
+  const progress = Math.min(1, elapsedSeconds / total);
+  if (progress < 0.25) return { border: "border-green-500/70", shadow: "shadow-[0_0_26px_rgba(34,197,94,0.13)]", text: "text-green-300", header: "from-green-500/10" };
+  if (progress < 0.5) return { border: "border-yellow-400/70", shadow: "shadow-[0_0_26px_rgba(250,204,21,0.13)]", text: "text-yellow-300", header: "from-yellow-500/10" };
+  if (progress < 0.75) return { border: "border-orange-500/70", shadow: "shadow-[0_0_26px_rgba(249,115,22,0.13)]", text: "text-orange-300", header: "from-orange-500/10" };
+  return { border: "border-red-500/70", shadow: "shadow-[0_0_26px_rgba(239,68,68,0.15)]", text: "text-red-300", header: "from-red-500/10" };
+}
+
+
 export default function Sessions() {
   const [sessions, setSessions] = useState([]);
   const { can } = useAuth();
@@ -173,7 +200,9 @@ export default function Sessions() {
   const [frameEndPausedSessionId, setFrameEndPausedSessionId] = useState(null);
   const [clearSessionTarget, setClearSessionTarget] = useState(null);
   const [exhaustionTarget, setExhaustionTarget] = useState(null);
+  const [timerPromptTarget, setTimerPromptTarget] = useState(null);
   const dismissedExhaustionIdRef = useRef(null);
+  const dismissedTimerPromptIdRef = useRef(null);
   const navigate = useNavigate();
 
   const load = async () => {
@@ -183,13 +212,17 @@ export default function Sessions() {
     ]);
     setSessions(s.data);
     setSnacks(sn.data);
+    const pendingTimerPrompts = (s.data || []).filter((x) => x.game_timer_enabled && x.timer_mode === "awaiting_decision");
+    if (pendingTimerPrompts.length === 0) dismissedTimerPromptIdRef.current = null;
+    const timerPrompt = pendingTimerPrompts.find((x) => x.id !== dismissedTimerPromptIdRef.current);
+    setTimerPromptTarget(timerPrompt || null);
     const exhausted = (s.data || []).find((x) => x.membership_exhausted && x.id !== dismissedExhaustionIdRef.current);
     if (exhausted) setExhaustionTarget(exhausted);
     else setExhaustionTarget(null);
   };
   useEffect(() => {
     load();
-    const t1 = setInterval(load, 20000);
+    const t1 = setInterval(load, 5000);
     const t2 = setInterval(() => setTick((x) => x + 1), 1000);
     return () => {
       clearInterval(t1);
@@ -228,7 +261,7 @@ export default function Sessions() {
     try {
       // A frame must be active before using the normal
       // Pause / Resume control.
-      if (!session.current_frame) {
+      if (!session.current_frame && !session.game_timer_enabled) {
         toast.error("Please start a frame first.");
         return;
       }
@@ -246,6 +279,36 @@ export default function Sessions() {
     } catch (e) {
       toast.error(formatApiErrorDetail(e.response?.data?.detail));
     }
+  };
+
+  const continueTimer = async (session) => {
+    try {
+      await api.post(`/sessions/${session.id}/timer/continue`);
+      toast.success("Count-up timer started · ₹5 per minute");
+      dismissedTimerPromptIdRef.current = session.id;
+      setTimerPromptTarget(null);
+      await load();
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e.response?.data?.detail));
+    }
+  };
+
+  const extendTimer = async (session, durationMinutes) => {
+    try {
+      await api.post(`/sessions/${session.id}/timer/extend`, { duration_minutes: durationMinutes });
+      toast.success(`${durationMinutes}-minute timer started`);
+      dismissedTimerPromptIdRef.current = session.id;
+      setTimerPromptTarget(null);
+      await load();
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e.response?.data?.detail));
+    }
+  };
+
+  const endExpiredTimer = async (session) => {
+    dismissedTimerPromptIdRef.current = session.id;
+    setTimerPromptTarget(null);
+    await openEndModal(session);
   };
 
   const clearSession = async (sessionId) => {
@@ -424,7 +487,36 @@ export default function Sessions() {
             s.is_paused,
             s.pause_started_at,
           );
-          const tableAmount = s.billing_type === "membership" ? 0 : e.tableAmount;
+          const rdAmount = (
+            s.rd_selected &&
+            ["snooker", "mini_snooker"].includes(
+              String(s.game_type || "").toLowerCase(),
+            )
+          )
+            ? Number(
+                s.rd_amount ??
+                  s.pricing_snapshot?.rd_price ??
+                  0,
+              )
+            : 0;
+
+          // For timer-based Snooker/Mini Snooker, the backend's table_amount
+          // already includes R.D. (_game_timer_amount adds it). Split it out
+          // for display so the modal shows Table + R.D. without double-counting.
+          const rawTableAmount =
+            s.billing_type === "membership"
+              ? Number(s.membership_extra_player_charge || 0)
+              : s.game_timer_enabled
+                ? Number(s.table_amount || 0)
+                : e.tableAmount;
+
+          const tableAmount =
+            s.game_timer_enabled && rdAmount > 0
+              ? Math.max(0, rawTableAmount - rdAmount)
+              : rawTableAmount;
+
+          const timerDisplay = s.game_timer_enabled ? formatGameTimer(s) : e.display;
+          const timerColor = countdownColor(s);
           const snacksAmount = (s.snacks || []).reduce(
             (total, item) =>
               total +
@@ -442,9 +534,9 @@ export default function Sessions() {
             <div
               key={s.id}
               data-testid={`active-session-${s.table_number}`}
-              className="bg-[#141414] border border-amber-500/30 rounded-2xl overflow-hidden shadow-[0_0_30px_rgba(245,158,11,0.05)]"
+              className={`bg-[#141414] border ${timerColor?.border || "border-amber-500/30"} rounded-2xl overflow-hidden ${timerColor?.shadow || "shadow-[0_0_30px_rgba(245,158,11,0.05)]"}`}
             >
-              <div className="p-6 border-b border-[#262626] flex items-center justify-between gap-4 flex-wrap bg-gradient-to-r from-amber-500/5 to-transparent">
+              <div className={`p-6 border-b border-[#262626] flex items-center justify-between gap-4 flex-wrap bg-gradient-to-r ${timerColor?.header || "from-amber-500/5"} to-transparent`}>
                 <div>
                   <div className="text-xs uppercase tracking-[0.2em] text-amber-400 font-bold flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-amber-400 pulse-dot inline-block" />{" "}
@@ -457,23 +549,28 @@ export default function Sessions() {
                     </span>
                   </div>
                   <div className="text-sm text-gray-400 mt-1">
-                    {s.customer_name || "Walk-in"} · {s.billing_type === "membership" ? `${s.membership_state?.plan || "Membership"} · ${s.membership_state?.member_name || "Member"}` : `@${inr(s.rate_used)}/hr`}
+                    {s.customer_name || "Walk-in"} · {s.billing_type === "membership" ? `${s.membership_state?.plan || "Membership"} · ${s.membership_state?.member_name || "Member"}` : s.game_timer_enabled ? `${(s.game_type || "snooker").replaceAll("_", " ")} · ${s.player_count ? `${s.player_count} players` : "Package"}${s.rd_selected ? " · R.D." : ""}` : `@${inr(s.rate_used)}/hr`}
                   </div>
                 </div>
                 <div className="text-right">
                   <div className="text-xs uppercase tracking-wider text-gray-500">
-                    {s.billing_type === "membership" ? "Daily time left" : "Elapsed"}
+                    {s.billing_type === "membership" ? "Daily time left" : s.game_timer_enabled ? (s.timer_mode === "countdown" ? "Time remaining" : s.timer_mode === "awaiting_decision" ? "Timer finished" : "Extra time") : "Elapsed"}
                   </div>
-                  <div className="text-3xl font-mono font-bold text-amber-300">
-                    {s.billing_type === "membership" ? `${String(Math.floor(membershipRemaining / 60)).padStart(2, "0")}:${String(membershipRemaining % 60).padStart(2, "0")}` : e.display}
+                  <div className={`text-3xl font-mono font-bold ${timerColor?.text || "text-amber-300"}`}>
+                    {s.billing_type === "membership" ? `${String(Math.floor(membershipRemaining / 60)).padStart(2, "0")}:${String(membershipRemaining % 60).padStart(2, "0")}` : timerDisplay}
                   </div>
                 </div>
               </div>
+              {s.game_timer_enabled && s.game_type !== "ps5" && (
+                <div className="px-6 pt-3 text-xs text-gray-400">
+                  {s.game_type === "pool" ? `Pool fixed packages · 30 min ₹${s.pricing_snapshot?.pool?.package_30 ?? 130} / 60 min ₹${s.pricing_snapshot?.pool?.package_60 ?? 250}` : `₹${s.pricing_snapshot?.[s.game_type]?.extra_minute ?? 5}/min after each initial 30-minute block · R.D. ${s.rd_selected ? `₹${s.rd_amount ?? s.pricing_snapshot?.rd_price ?? 20} included once` : "not selected"}`}
+                </div>
+              )}
               {s.billing_type === "membership" && (
                 <div className="px-6 pt-4 text-sm text-gray-300">
-                  <span className="text-green-400 font-semibold">Membership play</span>
+                  <span className="text-green-400 font-semibold">Membership play · {s.membership_player_count || 1} player(s) · extra player fee {inr(s.membership_extra_player_charge || 0)}</span>
                   <span className="mx-2">·</span>
-                  {Math.floor((s.membership_state?.used_seconds_today || 0) / 60)} min used of {s.membership_state?.daily_minutes || 0} min today
+                  {Math.floor((s.membership_state?.used_seconds_today || 0) / 60)} min used today · {Math.floor((s.membership_state?.remaining_total_seconds || 0) / 3600)}h {Math.floor(((s.membership_state?.remaining_total_seconds || 0) % 3600) / 60)}m package balance
                   <span className="mx-2">·</span>
                   Expires {s.membership_state?.expires_at ? new Date(s.membership_state.expires_at).toLocaleDateString("en-IN") : "—"}
                 </div>
@@ -483,9 +580,10 @@ export default function Sessions() {
                 <Stat label="Snacks" value={inr(snacksAmount)} />
                 <Stat label="Est. Bill" value={inr(bill)} accent="green" />
               </div>
-              <div className="px-6 pb-4">
-                <FramesSection
-                  session={s}
+              {String(s.game_type || "").toLowerCase() === "snooker" && (
+                <div className="px-6 pb-4">
+                  <FramesSection
+                    session={s}
                   onOpenEndFrame={async (session, isBilling) => {
                     try {
                       setBillingMode(isBilling);
@@ -522,9 +620,10 @@ export default function Sessions() {
                       );
                     }
                   }}
-                  onStartFrame={(session) => startFrame(session.id)}
-                />
-              </div>
+                    onStartFrame={(session) => startFrame(session.id)}
+                  />
+                </div>
+              )}
               <div className="px-6 pb-4">
                 <div className="text-xs uppercase tracking-wider text-gray-500 font-bold mb-2">
                   Snacks ({s.snacks?.length || 0})
@@ -576,12 +675,12 @@ export default function Sessions() {
                   {s.is_paused ? (
                     <>
                       <RotateCw className="w-4 h-4" />
-                      {s.current_frame ? "Resume" : "Resume"}
+                      Resume
                     </>
                   ) : (
                     <>
                       <Pause className="w-4 h-4" />
-                      {s.current_frame ? "Pause" : "Start Frame First"}
+                      {s.game_timer_enabled || s.current_frame ? "Pause" : "Start Frame First"}
                     </>
                   )}
                 </button>
@@ -618,6 +717,34 @@ export default function Sessions() {
           );
         })}
       </div>
+
+      {timerPromptTarget && (
+        <div className="fixed inset-0 z-[75] bg-black/80 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl border border-amber-500/40 bg-[#141414] p-6 space-y-4">
+            <div className="text-xs uppercase tracking-[0.2em] text-amber-400 font-bold">Timer completed</div>
+            <h3 className="text-xl font-bold">Table {timerPromptTarget.table_number} · Continue playing?</h3>
+            <p className="text-sm text-gray-300">
+              The selected time has ended. Billing for this block is frozen. Ask the customer whether they want to stop or continue.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <button onClick={() => extendTimer(timerPromptTarget, 30)} className="h-11 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold">
+                Add 30 min
+              </button>
+              <button onClick={() => extendTimer(timerPromptTarget, 60)} className="h-11 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold">
+                Add 60 min
+              </button>
+            </div>
+            {timerPromptTarget.game_type !== "pool" && (
+              <button onClick={() => continueTimer(timerPromptTarget)} className="w-full h-11 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-200 font-semibold">
+                Continue normally · ₹5/min
+              </button>
+            )}
+            <button onClick={() => endExpiredTimer(timerPromptTarget)} className="w-full h-11 rounded-xl bg-red-900/50 hover:bg-red-900/70 border border-red-800 text-red-100 font-semibold">
+              Stop and generate bill
+            </button>
+          </div>
+        </div>
+      )}
 
       {exhaustionTarget && (
         <div className="fixed inset-0 z-[70] bg-black/80 flex items-center justify-center p-4">
@@ -795,6 +922,9 @@ export default function Sessions() {
               console.error(e);
             }
 
+            if (endModal?.session?.game_timer_enabled && endModal.session.timer_mode === "awaiting_decision") {
+              dismissedTimerPromptIdRef.current = null;
+            }
             setBillingSessionId(null);
             setBillingResumeSessionId(null);
             setEndModal(null);
@@ -1072,6 +1202,36 @@ function SnackPicker({ snacks, onPick }) {
     </div>
   );
 }
+function formatClock(totalSeconds) {
+  const seconds = Math.max(0, Math.floor(totalSeconds || 0));
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const sec = seconds % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+}
+
+function formatGameTimer(session) {
+  if (session.timer_mode === "awaiting_decision") return "00:00:00";
+  if (session.is_paused) {
+    if (session.timer_mode === "countdown") return formatClock(session.timer_remaining_seconds);
+    const elapsed = (session.game_billing_segments || []).filter((x) => x.kind === "countup").reduce((sum, x) => sum + Number(x.elapsed_seconds || 0), 0);
+    return formatClock(elapsed);
+  }
+  if (session.timer_mode === "countdown") {
+    const elapsed = session.timer_started_at ? (Date.now() - new Date(session.timer_started_at).getTime()) / 1000 : 0;
+    return formatClock(Math.max(0, Number(session.timer_remaining_seconds || 0) - elapsed));
+  }
+  if (session.timer_mode === "countup") {
+    const segments = session.game_billing_segments || [];
+    const elapsed = segments.filter((x) => x.kind === "countup").reduce((sum, x) => {
+      const live = x.started_at ? Math.max(0, (Date.now() - new Date(x.started_at).getTime()) / 1000) : 0;
+      return sum + Number(x.elapsed_seconds || 0) + live;
+    }, 0);
+    return formatClock(elapsed);
+  }
+  return "00:00:00";
+}
+
 function computeBill(
   rate,
   frames = [],
@@ -1162,11 +1322,31 @@ function EndForm({ session, snapshot, onSubmit }) {
   const m = Math.floor((freezeSecs % 3600) / 60);
   const sec = freezeSecs % 60;
   const frozenDisplay = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  const tableAmount = Number(snapshot?.table_amount ?? 0);
   const snacksAmount = Number(
     snapshot?.snacks_amount ?? session.snacks_amount ?? 0,
   );
-  const subtotal = tableAmount + snacksAmount - Number(discount || 0);
+  const normalizedGameType = String(session.game_type || "").toLowerCase();
+  const rdAmount =
+    session.rd_selected &&
+    ["snooker", "mini_snooker"].includes(normalizedGameType)
+      ? Number(
+          snapshot?.rd_amount ??
+            session.rd_amount ??
+            session.pricing_snapshot?.rd_price ??
+            0,
+        )
+      : 0;
+
+  // Timer preview table_amount already includes R.D. from the backend timer
+  // helper. Remove it from the displayed table line before adding the
+  // separate R.D. line below. Non-timer frame billing excludes R.D. already.
+  const rawTableAmount = Number(snapshot?.table_amount ?? 0);
+  const tableAmount =
+    session.game_timer_enabled && rdAmount > 0
+      ? Math.max(0, rawTableAmount - rdAmount)
+      : rawTableAmount;
+
+  const subtotal = tableAmount + snacksAmount + rdAmount - Number(discount || 0);
   const taxAmount = (subtotal * Number(tax || 0)) / 100;
   const totalExact = subtotal + taxAmount;
   const total = totalExact;
@@ -1211,7 +1391,7 @@ function EndForm({ session, snapshot, onSubmit }) {
     <div className="flex flex-col min-h-0 flex-1" data-testid="end-form-frozen">
       {/* Scrollable body */}
       <div className="px-5 py-5 pr-7 space-y-4 overflow-y-auto flex-1">
-        {previewFrames.length > 0 && (
+        {!session.game_timer_enabled && previewFrames.length > 0 && (
           <div className="p-3 rounded-xl bg-[#0f0f0f] border border-[#262626]">
             <div className="text-[10px] uppercase tracking-wider text-gray-500 font-bold mb-2">
               Frame Breakdown
@@ -1234,7 +1414,11 @@ function EndForm({ session, snapshot, onSubmit }) {
           <Stat label="Duration" value={frozenDisplay} />
           <Stat label="Table" value={inr(tableAmount)} />
           <Stat label="Snacks" value={inr(snacksAmount)} />
-          <Stat label="Subtotal" value={inr(tableAmount + snacksAmount)} />
+          {rdAmount > 0 && <Stat label="R.D." value={inr(rdAmount)} />}
+          <Stat
+            label="Subtotal"
+            value={inr(tableAmount + snacksAmount + rdAmount)}
+          />
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>

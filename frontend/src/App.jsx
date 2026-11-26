@@ -11,12 +11,14 @@ import Login from "@/pages/Login";
 
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const Tables = lazy(() => import("@/pages/Tables"));
+const PS5Bookings = lazy(() => import("@/pages/PS5Bookings"));
 const Sessions = lazy(() => import("@/pages/Sessions"));
 const Snacks = lazy(() => import("@/pages/Snacks"));
 const FoodOrders = lazy(() => import("@/pages/FoodOrders"));
 const Reports = lazy(() => import("@/pages/Reports"));
 const Expenses = lazy(() => import("@/pages/Expenses"));
 const Staff = lazy(() => import("@/pages/Staff"));
+const Settings = lazy(() => import("@/pages/Settings"));
 const Bill = lazy(() => import("@/pages/Bill"));
 const MembershipLayout = lazy(() => import("@/pages/memberships/MembershipLayout"));
 const MembershipOverview = lazy(() => import("@/pages/memberships/MembershipOverview"));
@@ -40,11 +42,13 @@ export default function App() {
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/tables" element={<Tables />} />
+      <Route path="/ps5-bookings" element={<Protected perm="manage_sessions"><PS5Bookings /></Protected>}/>
       <Route path="/sessions" element={<Protected perm="manage_sessions"><Sessions /></Protected>} />
       <Route path="/snacks" element={<Snacks />} />
       <Route path="/reports" element={<Protected perm="view_reports"><Reports /></Protected>} />
       <Route path="/expenses" element={<Protected perm="view_expenses"><Expenses /></Protected>} />
       <Route path="/staff" element={<Protected perm="manage_users"><Staff /></Protected>} />
+      <Route path="/settings" element={<Protected perm="manage_settings"><Settings /></Protected>} />
       <Route path="/bill/:id" element={<Bill />} />
       <Route path="/food-orders" element={<FoodOrders />} />
     </Route>

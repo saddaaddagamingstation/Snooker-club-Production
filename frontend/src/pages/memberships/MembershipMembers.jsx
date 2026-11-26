@@ -282,7 +282,7 @@ export default function MembershipMembers() {
               <option value="">Select package</option>
               {packages.map((p) => (
                 <option key={p.id} value={p.id}>
-                  {p.name} · ₹{p.price} · {p.daily_minutes} min/day
+                  {p.name} · ₹{p.price} · {p.total_hours} total hours · max 2h/day
                 </option>
               ))}
             </select>
@@ -397,7 +397,7 @@ export default function MembershipMembers() {
 
                 {packages.map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.name} · ₹{p.price} · {p.daily_minutes} min/day
+                    {p.name} · ₹{p.price} · {p.total_hours} total hours · max 2h/day
                   </option>
                 ))}
               </select>
@@ -508,7 +508,7 @@ export default function MembershipMembers() {
                       : "—"}
                   </td>
 
-                  <td className="p-3">{m.daily_minutes} min</td>
+                  <td className="p-3">{Math.floor((m.remaining_total_seconds || 0) / 3600)}h {Math.floor(((m.remaining_total_seconds || 0) % 3600) / 60)}m left</td>
 
                   <td className="p-3">
                     <span

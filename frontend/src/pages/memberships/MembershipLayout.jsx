@@ -26,6 +26,19 @@ export default function MembershipLayout() {
 
       {/* Sidebar */}
       <aside className="w-56 shrink-0 bg-[#0d0d0d] border-r border-[#1c1c1c] min-h-screen flex flex-col">
+
+        {/* Back to Home - Top */}
+        <div className="p-3 border-b border-[#1c1c1c]">
+          <Link
+            to="/dashboard"
+            className="flex items-center gap-2 text-sm font-medium text-gray-300 hover:text-white px-3 py-2.5 rounded-lg bg-[#1c1c1c] hover:bg-[#252525] transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Back to Home
+          </Link>
+        </div>
+
+        {/* Membership Branding */}
         <div className="p-4 border-b border-[#1c1c1c]">
           <div className="text-xl font-bold">CUE OPS</div>
           <div className="text-xs text-green-500 uppercase tracking-[.2em] mt-1">
@@ -33,6 +46,7 @@ export default function MembershipLayout() {
           </div>
         </div>
 
+        {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-1">
           {links.map(({ to, label, icon: Icon, end }) => (
             <NavLink
@@ -53,15 +67,8 @@ export default function MembershipLayout() {
           ))}
         </nav>
 
+        {/* User / Logout */}
         <div className="p-3 border-t border-[#1c1c1c] space-y-2">
-          <Link
-            to="/dashboard"
-            className="flex items-center gap-2 text-sm text-gray-300 hover:text-white px-3 py-2.5 rounded-lg bg-[#1c1c1c]"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Back to Cue Ops
-          </Link>
-
           <div className="text-xs text-gray-500 px-3">
             Signed in as {user?.name || "User"}
           </div>

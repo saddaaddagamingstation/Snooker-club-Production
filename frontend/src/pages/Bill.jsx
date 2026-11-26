@@ -29,6 +29,27 @@ export default function Bill() {
   if (!s) return <div className="text-gray-400">Loading…</div>;
   const hours = Math.floor(s.duration_minutes / 60);
   const minutes = s.duration_minutes % 60;
+  const gameTypeLabel = {
+    snooker: "Snooker",
+    mini_snooker: "Mini Snooker",
+    pool: "Pool",
+    ps5: "PS5",
+  }[String(s.game_type || "").toLowerCase()] || s.game_type || "Game";
+
+  const rdAmount = s.rd_selected
+    ? Number(s.rd_amount ?? s.pricing_snapshot?.rd_price ?? 0)
+    : 0;
+  const tableChargeDisplay = s.game_timer_enabled
+    ? Math.max(0, Number(s.table_amount || 0) - rdAmount)
+    : Number(s.table_amount || 0);
+
+  const billingTypeLabel =
+    s.billing_type === "membership"
+      ? `Membership${s.membership_plan ? ` · ${s.membership_plan}` : ""}`
+      : "Regular";
+
+  const playerCountLabel =
+    Number(s.player_count) > 0 ? `${s.player_count} player${Number(s.player_count) === 1 ? "" : "s"}` : null;
 
   const groupedSnacks = Object.values(
     (s.snacks || []).reduce((acc, item) => {
@@ -66,7 +87,7 @@ export default function Bill() {
     try {
       await html2pdf()
         .set({
-          margin: [10, 10, 10, 10],
+          margin: [4, 4, 4, 4],
           filename,
           image: {
             type: "jpeg",
@@ -80,6 +101,36 @@ export default function Bill() {
               const clonedBill = clonedDoc.getElementById("printable-bill");
 
               if (!clonedBill) return;
+
+              const compactPrintStyle = clonedDoc.createElement("style");
+              compactPrintStyle.textContent = `
+                @page { size: A4 portrait; margin: 4mm !important; }
+                #printable-bill {
+                  box-sizing: border-box !important;
+                  width: 100% !important;
+                  max-width: 100% !important;
+                  padding: 6mm !important;
+                  border-radius: 0 !important;
+                  font-size: 10px !important;
+                  line-height: 1.2 !important;
+                }
+                #printable-bill .text-2xl { font-size: 18px !important; line-height: 1.2 !important; }
+                #printable-bill .text-4xl { font-size: 25px !important; line-height: 1.1 !important; }
+                #printable-bill .pb-6 { padding-bottom: 8px !important; }
+                #printable-bill .py-6 { padding-top: 8px !important; padding-bottom: 8px !important; }
+                #printable-bill .pt-4 { padding-top: 8px !important; }
+                #printable-bill .mt-8 { margin-top: 8px !important; }
+                #printable-bill .mt-2 { margin-top: 3px !important; }
+                #printable-bill .gap-6 { gap: 8px !important; }
+                #printable-bill .gap-3 { gap: 8px !important; }
+                #printable-bill .space-y-2 > :not([hidden]) ~ :not([hidden]) { margin-top: 4px !important; }
+                #printable-bill .space-y-1.5 > :not([hidden]) ~ :not([hidden]) { margin-top: 3px !important; }
+                #printable-bill th { padding-bottom: 4px !important; }
+                #printable-bill td { padding-top: 4px !important; padding-bottom: 4px !important; }
+                #printable-bill tr { break-inside: avoid !important; page-break-inside: avoid !important; }
+                #printable-bill table { font-size: 10px !important; }
+              `;
+              clonedDoc.head.appendChild(compactPrintStyle);
 
               const forceStyle = (element, property, value) => {
                 element.style.setProperty(property, value, "important");
@@ -146,6 +197,44 @@ export default function Bill() {
 
   return (
     <div className="space-y-6 max-w-3xl mx-auto" data-testid="bill-page">
+      <style>{`
+        @page { size: A4 portrait; margin: 4mm; }
+        @media print {
+          html, body { background: #fff !important; margin: 0 !important; padding: 0 !important; }
+          body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          [data-testid="bill-page"] { display: block !important; width: 100% !important; max-width: none !important; margin: 0 !important; padding: 0 !important; }
+          [data-testid="bill-page"] > :not(#printable-bill) { display: none !important; }
+          #printable-bill {
+            box-sizing: border-box !important;
+            width: 100% !important;
+            max-width: 100% !important;
+            padding: 6mm !important;
+            margin: 0 !important;
+            border: 1px solid #ddd !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            font-size: 10px !important;
+            line-height: 1.2 !important;
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+          #printable-bill .text-2xl { font-size: 18px !important; line-height: 1.2 !important; }
+          #printable-bill .text-4xl { font-size: 25px !important; line-height: 1.1 !important; }
+          #printable-bill .pb-6 { padding-bottom: 8px !important; }
+          #printable-bill .py-6 { padding-top: 8px !important; padding-bottom: 8px !important; }
+          #printable-bill .pt-4 { padding-top: 8px !important; }
+          #printable-bill .mt-8 { margin-top: 8px !important; }
+          #printable-bill .mt-2 { margin-top: 3px !important; }
+          #printable-bill .gap-6 { gap: 8px !important; }
+          #printable-bill .gap-3 { gap: 8px !important; }
+          #printable-bill .space-y-2 > :not([hidden]) ~ :not([hidden]) { margin-top: 4px !important; }
+          #printable-bill .space-y-1.5 > :not([hidden]) ~ :not([hidden]) { margin-top: 3px !important; }
+          #printable-bill th { padding-bottom: 4px !important; }
+          #printable-bill td { padding-top: 4px !important; padding-bottom: 4px !important; }
+          #printable-bill tr { break-inside: avoid !important; page-break-inside: avoid !important; }
+          #printable-bill table { font-size: 10px !important; }
+        }
+      `}</style>
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <button
           onClick={() => navigate(-1)}
@@ -252,6 +341,35 @@ export default function Bill() {
               {new Date(s.end_time).toLocaleString()}
             </div>
           </div>
+
+          <div>
+            <div className="text-xs uppercase tracking-wider text-gray-500 font-bold">
+              Game
+            </div>
+            <div className="font-semibold mt-1">{gameTypeLabel}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-xs uppercase tracking-wider text-gray-500 font-bold">
+              Billing
+            </div>
+            <div className="font-semibold mt-1">{billingTypeLabel}</div>
+          </div>
+          {playerCountLabel && (
+            <div>
+              <div className="text-xs uppercase tracking-wider text-gray-500 font-bold">
+                Players
+              </div>
+              <div className="font-semibold mt-1">{playerCountLabel}</div>
+            </div>
+          )}
+          {s.rd_selected && (
+            <div className="text-right">
+              <div className="text-xs uppercase tracking-wider text-gray-500 font-bold">
+                R.D.
+              </div>
+              <div className="font-semibold mt-1 text-green-400">Selected</div>
+            </div>
+          )}
         </div>
 
         <div className="py-6 border-b border-[#262626]">
@@ -265,29 +383,51 @@ export default function Bill() {
               </tr>
             </thead>
             <tbody>
-              {(s.frames || []).map((f) => (
-                <tr key={f.id} className="border-t border-[#262626]">
+              {/*
+                Timer-based sessions calculate the charge at session level.
+                The backend intentionally stores frame amounts as zero for
+                these sessions, so never show those zero-value frame rows.
+              */}
+              {s.game_timer_enabled ? (
+                <tr className="border-t border-[#262626]">
                   <td className="py-2.5">
-                    Frame {f.frame_number}
-                    {f.winner && (
-                      <span className="text-gray-500 text-xs">
-                        {" "}
-                        · {f.winner} beat {f.loser}
-                      </span>
-                    )}
+                    Table {s.table_number} · Game session
+                    {s.billing_type === "membership" ? " (Membership)" : ""}
                   </td>
                   <td className="py-2.5 text-right font-mono">
-                    {f.duration_minutes}m
+                    {hours}h {minutes}m
                   </td>
                   <td className="py-2.5 text-right font-mono">
-                    {inr(s.rate_used)}/hr
+                    Session charge
                   </td>
                   <td className="py-2.5 text-right font-mono font-bold">
-                    {inr(f.amount || 0)}
+                    {inr(tableChargeDisplay)}
                   </td>
                 </tr>
-              ))}
-              {(!s.frames || s.frames.length === 0) && (
+              ) : (s.frames || []).length > 0 ? (
+                (s.frames || []).map((f) => (
+                  <tr key={f.id || f.frame_number} className="border-t border-[#262626]">
+                    <td className="py-2.5">
+                      Frame {f.frame_number}
+                      {f.winner && (
+                        <span className="text-gray-500 text-xs">
+                          {" "}
+                          · {f.winner} beat {f.loser}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2.5 text-right font-mono">
+                      {f.duration_minutes}m
+                    </td>
+                    <td className="py-2.5 text-right font-mono">
+                      {inr(s.rate_used)}/hr
+                    </td>
+                    <td className="py-2.5 text-right font-mono font-bold">
+                      {inr(f.amount || 0)}
+                    </td>
+                  </tr>
+                ))
+              ) : (
                 <tr className="border-t border-[#262626]">
                   <td className="py-2.5">
                     Table {s.table_number} · {hours}h {minutes}m
@@ -319,8 +459,13 @@ export default function Bill() {
 
         <div className="py-6 space-y-2 text-sm">
           <div data-testid="bill-table-charge">
-            <Row label="Table Charge" value={inr(s.table_amount)} />
+            <Row label="Table Charge" value={inr(tableChargeDisplay)} />
           </div>
+          {s.rd_selected && (
+            <div data-testid="bill-rd-charge">
+              <Row label="R.D. Add-on" value={inr(rdAmount)} />
+            </div>
+          )}
           <Row label="Snacks Total" value={inr(s.snacks_amount)} />
           <Row label="Discount" value={`- ${inr(s.discount)}`} />
           <Row label={`Tax (${s.tax_percent}%)`} value={inr(s.tax_amount)} />
@@ -348,6 +493,16 @@ export default function Bill() {
                 </span>
               </div>
             </div>
+          </div>
+        )}
+        {(s.payment_notes || s.ended_by_name) && (
+          <div className="border-t border-[#262626] pt-4 pb-2 space-y-2 text-sm">
+            {s.payment_notes && (
+              <Row label="Payment Note" value={s.payment_notes} />
+            )}
+            {s.ended_by_name && (
+              <Row label="Processed By" value={s.ended_by_name} />
+            )}
           </div>
         )}
         <div className="pt-4 border-t border-[#262626] flex items-center justify-between">

@@ -15,7 +15,7 @@ import secrets
 from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 import calendar
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import bcrypt
 import jwt
@@ -145,7 +145,176 @@ def local_day_range(day=None):
 def iso(dt: datetime) -> str:
     return dt.isoformat()
 
+
+# ---- Game timer billing (PS5 intentionally does not use this system) ----
+DEFAULT_GAME_PRICING = {
+    "snooker": {"players": {"2": 170, "3": 170, "4": 180, "5": 220, "6": 260}, "extra_minute": 5},
+    "mini_snooker": {"players": {"2": 110, "3": 120, "4": 130, "5": 140, "6": 150}, "extra_minute": 5},
+    "pool": {"package_30": 130, "package_60": 250},
+    "ps5": {"hourly_rate": None},
+    "rd_price": 20,
+}
+
+async def _get_game_pricing():
+    saved = await db.settings.find_one({"key": "game_pricing"}, {"_id": 0})
+    value = (saved or {}).get("value") or {}
+    # Merge defaults so newly introduced fields remain available on older configs.
+    result = {**DEFAULT_GAME_PRICING, **value}
+    for game in ("snooker", "mini_snooker"):
+        result[game] = {**DEFAULT_GAME_PRICING[game], **(value.get(game) or {})}
+        result[game]["players"] = {**DEFAULT_GAME_PRICING[game]["players"], **(value.get(game, {}).get("players") or {})}
+    for game in ("pool", "ps5"):
+        result[game] = {**DEFAULT_GAME_PRICING[game], **(value.get(game) or {})}
+    return result
+
+
+def _game_type(session_or_table):
+    # Preserve unknown/separate game identifiers (including PS5) rather than
+    # accidentally routing them through the regular-table timer billing.
+    return (session_or_table or {}).get("game_type") or "snooker"
+
+
+def _fixed_block_price(game_type: str, player_count: int, duration_minutes: int, pricing=None) -> float:
+    pricing = pricing or DEFAULT_GAME_PRICING
+    if game_type == "pool":
+        if duration_minutes == 30:
+            return float(pricing["pool"]["package_30"])
+        if duration_minutes == 60:
+            return float(pricing["pool"]["package_60"])
+        raise HTTPException(status_code=400, detail="Pool packages are 30 or 60 minutes")
+    rates = pricing.get(game_type, {}).get("players", {})
+    base = rates.get(str(player_count), rates.get(player_count))
+    if base is None:
+        raise HTTPException(status_code=400, detail="Choose 2 to 6 players")
+    extra_rate = float(pricing.get(game_type, {}).get("extra_minute", 5))
+    return float(base) + max(0, duration_minutes - 30) * extra_rate
+
+
+def _dt_seconds_since(value, now):
+    if not value:
+        return 0.0
+    try:
+        start = datetime.fromisoformat(value)
+        return max(0.0, (now - start).total_seconds())
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _game_timer_played_seconds(session, now=None):
+    now = now or now_utc()
+    total = 0.0
+    for segment in session.get("game_billing_segments", []):
+        if segment.get("kind") == "fixed":
+            played = float(segment.get("played_seconds", 0))
+            if segment.get("started_at") and not session.get("is_paused"):
+                played += _dt_seconds_since(segment.get("started_at"), now)
+            total += played
+        elif segment.get("kind") == "countup":
+            total += float(segment.get("elapsed_seconds", 0))
+            if segment.get("started_at") and not session.get("is_paused"):
+                total += _dt_seconds_since(segment.get("started_at"), now)
+    return max(0, int(total))
+
+
+def _game_timer_amount(session, now=None):
+    now = now or now_utc()
+    total = sum(
+        float(seg.get("amount", 0))
+        for seg in session.get("game_billing_segments", [])
+        if seg.get("kind") == "fixed"
+    )
+    for seg in session.get("game_billing_segments", []):
+        if seg.get("kind") == "countup":
+            seconds = float(seg.get("elapsed_seconds", 0))
+            if seg.get("started_at") and not session.get("is_paused"):
+                seconds += _dt_seconds_since(seg.get("started_at"), now)
+            total += ((int(seconds) + 59) // 60) * float(seg.get("rate_per_minute", 5))
+    return round(total + float(session.get("rd_amount", 0)), 2)
+
+
+def _pause_game_timer(session, now):
+    updates = {}
+    segments = list(session.get("game_billing_segments", []))
+    mode = session.get("timer_mode")
+    if mode == "countdown" and session.get("timer_started_at"):
+        elapsed = _dt_seconds_since(session.get("timer_started_at"), now)
+        remaining = max(0, int(float(session.get("timer_remaining_seconds", 0)) - elapsed))
+        if segments and segments[-1].get("kind") == "fixed" and segments[-1].get("started_at"):
+            segments[-1]["played_seconds"] = float(segments[-1].get("played_seconds", 0)) + min(elapsed, float(session.get("timer_remaining_seconds", 0)))
+            segments[-1]["started_at"] = None
+        updates.update({"timer_remaining_seconds": remaining, "timer_started_at": None})
+    elif mode == "countup" and segments and segments[-1].get("kind") == "countup" and segments[-1].get("started_at"):
+        segments[-1]["elapsed_seconds"] = float(segments[-1].get("elapsed_seconds", 0)) + _dt_seconds_since(segments[-1]["started_at"], now)
+        segments[-1]["started_at"] = None
+        updates["timer_started_at"] = None
+    if segments:
+        updates["game_billing_segments"] = segments
+    return updates
+
+
+def _resume_game_timer(session, now):
+    updates = {}
+    segments = list(session.get("game_billing_segments", []))
+    if session.get("timer_mode") == "countdown" and int(session.get("timer_remaining_seconds", 0)) > 0:
+        updates["timer_started_at"] = iso(now)
+        if segments and segments[-1].get("kind") == "fixed":
+            segments[-1]["started_at"] = iso(now)
+    elif session.get("timer_mode") == "countup" and segments and segments[-1].get("kind") == "countup":
+        segments[-1]["started_at"] = iso(now)
+        updates["timer_started_at"] = iso(now)
+    if segments:
+        updates["game_billing_segments"] = segments
+    return updates
+
+
+async def _sync_game_timer(session, now=None):
+    """Persist countdown expiry so the server, not the browser, decides when play time ends."""
+    if not session or not session.get("game_timer_enabled"):
+        return session
+    now = now or now_utc()
+    if session.get("timer_mode") == "countdown" and not session.get("is_paused") and session.get("timer_started_at"):
+        elapsed = _dt_seconds_since(session.get("timer_started_at"), now)
+        remaining = max(0, int(float(session.get("timer_remaining_seconds", 0)) - elapsed))
+        if remaining <= 0:
+            segments = list(session.get("game_billing_segments", []))
+            if segments and segments[-1].get("kind") == "fixed":
+                seg = segments[-1]
+                seg["played_seconds"] = float(seg.get("played_seconds", 0)) + float(session.get("timer_remaining_seconds", 0))
+                seg["started_at"] = None
+                seg["status"] = "completed"
+            updates = {
+                "timer_mode": "awaiting_decision",
+                "timer_remaining_seconds": 0,
+                "timer_started_at": None,
+                "timer_expired_at": iso(now),
+                "game_billing_segments": segments,
+            }
+            await db.sessions.update_one({"id": session["id"], "status": "active"}, {"$set": updates})
+            session.update(updates)
+        # Keep the persisted remaining value paired with the original timer_started_at.
+        # The client and server both derive the live remainder from that same anchor.
+    return session
+
+
+def _new_fixed_segment(game_type, player_count, duration_minutes, now, pricing=None):
+    pricing = pricing or DEFAULT_GAME_PRICING
+    amount = _fixed_block_price(game_type, player_count, duration_minutes, pricing)
+    return {
+        "id": str(uuid.uuid4()),
+        "kind": "fixed",
+        "duration_minutes": int(duration_minutes),
+        "duration_seconds": int(duration_minutes) * 60,
+        "played_seconds": 0,
+        "amount": amount,
+        "rate_per_minute": float(pricing.get(game_type, {}).get("extra_minute", 5)),
+        "started_at": iso(now),
+        "status": "active",
+    }
+
 # ---- Models ----
+class GamePricingUpdate(BaseModel):
+    pricing: Dict
+
 class LoginReq(BaseModel):
     email: EmailStr
     password: str
@@ -162,12 +331,14 @@ class TableIn(BaseModel):
     table_name: str
     hourly_rate: float
     status: str = "available"  # available | running | reserved | maintenance
+    game_type: Literal["snooker", "mini_snooker", "pool"] = "snooker"
 
 class TableUpdate(BaseModel):
     table_number: Optional[str] = None
     table_name: Optional[str] = None
     hourly_rate: Optional[float] = None
     status: Optional[str] = None
+    game_type: Optional[Literal["snooker", "mini_snooker", "pool"]] = None
 
 class SnackIn(BaseModel):
     name: str
@@ -192,16 +363,23 @@ class SessionStart(BaseModel):
     notes: Optional[str] = ""
     billing_type: Literal["normal", "membership"] = "normal"
     membership_id: Optional[str] = None
+    player_count: Optional[int] = Field(default=2, ge=1, le=6)
+    rd_selected: bool = False
+    duration_minutes: Optional[int] = Field(default=30, ge=1, le=1440)
+
+class TimerExtend(BaseModel):
+    duration_minutes: int = Field(ge=1, le=1440)
 
 class MembershipCreate(BaseModel):
     member_name: str
     phone: Optional[str] = ""
-    plan: Literal["silver", "gold"]
+    plan: Literal["bronze", "silver", "gold", "platinum"]
 
 class MembershipPackageIn(BaseModel):
     name: str
     price: float = Field(ge=0)
-    daily_minutes: int = Field(gt=0)
+    total_hours: int = Field(gt=0)
+    daily_minutes: int = Field(default=120, gt=0)
     description: Optional[str] = ""
     is_active: bool = True
 
@@ -230,6 +408,9 @@ class FoodOrderCreate(BaseModel):
 
 class FoodOrderAttach(BaseModel):
     table_id: str
+    player_count: Optional[int] = Field(default=2, ge=2, le=6)
+    rd_selected: bool = False
+    duration_minutes: Optional[int] = Field(default=30, ge=1, le=1440)
 
 class FreezeSnapshot(BaseModel):
     end_time: str
@@ -610,6 +791,35 @@ def require_permission(perm: str):
             raise HTTPException(status_code=403, detail=f"Permission denied: {perm}")
         return user
     return _dep
+
+# ---- Game pricing settings (admin only) ----
+@api.get("/settings/game-pricing")
+async def get_game_pricing(user=Depends(get_current_user)):
+    return await _get_game_pricing()
+
+@api.put("/settings/game-pricing")
+async def update_game_pricing(body: GamePricingUpdate, user=Depends(require_admin)):
+    p = body.pricing or {}
+    try:
+        for game in ("snooker", "mini_snooker"):
+            players = p[game]["players"]
+            if any(float(players[str(n)]) < 0 for n in range(2, 7)) or float(p[game]["extra_minute"]) < 0:
+                raise ValueError()
+        if any(float(p["pool"][k]) < 0 for k in ("package_30", "package_60")):
+            raise ValueError()
+        if (p["ps5"].get("hourly_rate") is not None and float(p["ps5"]["hourly_rate"]) < 0) or float(p["rd_price"]) < 0:
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid pricing values")
+    normalized = {
+        "snooker": {"players": {str(n): float(p["snooker"]["players"][str(n)]) for n in range(2, 7)}, "extra_minute": float(p["snooker"]["extra_minute"])},
+        "mini_snooker": {"players": {str(n): float(p["mini_snooker"]["players"][str(n)]) for n in range(2, 7)}, "extra_minute": float(p["mini_snooker"]["extra_minute"])},
+        "pool": {"package_30": float(p["pool"]["package_30"]), "package_60": float(p["pool"]["package_60"])},
+        "ps5": {"hourly_rate": None if p["ps5"].get("hourly_rate") in (None, "") else float(p["ps5"]["hourly_rate"])},
+        "rd_price": float(p["rd_price"]),
+    }
+    await db.settings.update_one({"key": "game_pricing"}, {"$set": {"key": "game_pricing", "value": normalized, "updated_at": iso(now_utc()), "updated_by": user["id"]}}, upsert=True)
+    return normalized
 
 # ---- Auth Routes ----
 @api.post("/auth/login")
@@ -1211,7 +1421,10 @@ async def start_table_from_food_order(
         SessionStart(
             table_id=body.table_id,
             customer_name=order.get("customer_name", ""),
-            notes=""
+            notes="",
+            player_count=body.player_count,
+            rd_selected=body.rd_selected,
+            duration_minutes=body.duration_minutes,
         ),
         user
     )
@@ -1333,9 +1546,21 @@ def _membership_day_key(dt):
     return dt.astimezone(CLUB_TIMEZONE).date().isoformat()
 
 
+def _membership_total_hours(membership):
+    if membership.get("total_hours"):
+        return int(membership["total_hours"])
+    legacy = {"bronze": 10, "silver": 20, "gold": 30, "platinum": 40}
+    return legacy.get(str(membership.get("plan", "")).lower(), 0)
+
+
 def _membership_plan(plan):
-    return {"silver": {"monthly_fee": 3000, "daily_minutes": 60},
-            "gold": {"monthly_fee": 5000, "daily_minutes": 120}}[plan]
+    plans = {
+        "bronze": {"monthly_fee": 1099, "total_hours": 10, "daily_minutes": 120},
+        "silver": {"monthly_fee": 2199, "total_hours": 20, "daily_minutes": 120},
+        "gold": {"monthly_fee": 3199, "total_hours": 30, "daily_minutes": 120},
+        "platinum": {"monthly_fee": 4199, "total_hours": 40, "daily_minutes": 120},
+    }
+    return plans[plan]
 
 
 async def _settle_membership_usage(session, until=None):
@@ -1373,8 +1598,13 @@ async def _settle_membership_usage(session, until=None):
     remaining_seconds = (end - cursor).total_seconds()
     point = cursor
     exhausted_at = expiry if requested_end > expiry else None
-    daily_cap = int(membership.get("daily_minutes", 0)) * 60
-    while remaining_seconds > 0:
+    daily_cap = min(int(membership.get("daily_minutes", 120)) * 60, 7200)
+    total_cap = _membership_total_hours(membership) * 3600
+    total_used = sum(float(v or 0) for v in usage.values())
+    total_available = max(0.0, total_cap - total_used)
+    if total_available <= 0:
+        exhausted_at = cursor
+    while remaining_seconds > 0 and total_available > 0 and not exhausted_at:
         local_point = point.astimezone(CLUB_TIMEZONE)
         next_midnight_local = (local_point.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
         next_midnight_utc = next_midnight_local.astimezone(timezone.utc)
@@ -1383,9 +1613,13 @@ async def _settle_membership_usage(session, until=None):
         key = _membership_day_key(point)
         already_used = float(usage.get(key, 0))
         available = max(0.0, daily_cap - already_used)
-        credited = min(segment_seconds, available)
+        credited = min(segment_seconds, available, total_available)
         usage[key] = already_used + credited
+        total_available -= credited
         if credited < segment_seconds:
+            exhausted_at = point + timedelta(seconds=credited)
+            break
+        if total_available <= 0:
             exhausted_at = point + timedelta(seconds=credited)
             break
         point = segment_end
@@ -1409,18 +1643,27 @@ async def _membership_status(membership, at=None):
     at = at or now_utc()
     local = at.astimezone(CLUB_TIMEZONE)
     key = local.date().isoformat()
-    allowance = int(membership.get("daily_minutes", 0)) * 60
-    used = float((membership.get("daily_usage") or {}).get(key, 0))
+    allowance = min(int(membership.get("daily_minutes", 120)), 120) * 60
+    usage = membership.get("daily_usage") or {}
+    used = float(usage.get(key, 0))
+    total_used = sum(float(v or 0) for v in usage.values())
+    total_hours = _membership_total_hours(membership)
+    total_seconds = total_hours * 3600
+    total_remaining = max(0, int(total_seconds - total_used))
     expiry = datetime.fromisoformat(membership["expires_at"])
+    expired = at >= expiry or membership.get("status") != "active"
     return {
         "membership_id": membership["id"],
         "member_name": membership.get("member_name", ""),
         "phone": membership.get("phone", ""),
         "plan": membership.get("plan", "").title(),
         "monthly_fee": membership.get("monthly_fee", 0),
-        "daily_minutes": membership.get("daily_minutes", 0),
+        "total_hours": total_hours,
+        "total_used_seconds": int(total_used),
+        "remaining_total_seconds": total_remaining,
+        "daily_minutes": min(int(membership.get("daily_minutes", 120)), 120),
         "expires_at": membership["expires_at"],
-        "is_expired": at > expiry or membership.get("status") != "active",
+        "is_expired": expired,
         "used_seconds_today": int(used),
         "remaining_seconds_today": max(0, int(allowance - used)),
         "as_of": iso(at),
@@ -1456,16 +1699,23 @@ async def create_membership(body: MembershipCreate, user=Depends(require_permiss
 
 # ---- Membership administration ----
 async def _ensure_membership_packages():
-    if await db.membership_packages.count_documents({}) == 0:
-        now = iso(now_utc())
-        await db.membership_packages.insert_many([
-            {"id": str(uuid.uuid4()), "name": "Silver", "price": 3000,
-             "daily_minutes": 60, "description": "60 minutes daily", "is_active": True,
-             "created_at": now, "updated_at": now},
-            {"id": str(uuid.uuid4()), "name": "Gold", "price": 5000,
-             "daily_minutes": 120, "description": "120 minutes daily", "is_active": True,
-             "created_at": now, "updated_at": now},
-        ])
+    now = iso(now_utc())
+    plans = [
+        ("Bronze", 1099, 10),
+        ("Silver", 2199, 20),
+        ("Gold", 3199, 30),
+        ("Platinum", 4199, 40),
+    ]
+    for name, price, hours in plans:
+        await db.membership_packages.update_one(
+            {"name": {"$regex": f"^{name}$", "$options": "i"}},
+            {"$set": {"name": name, "price": price, "total_hours": hours,
+                      "daily_minutes": 120, "description": f"{hours} total hours · max 2 hours/day · valid 30 days",
+                      "is_active": True, "updated_at": now},
+             "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+            upsert=True,
+        )
+
 
 @api.get("/membership-admin/overview")
 async def membership_admin_overview(user=Depends(require_permission("manage_sessions"))):
@@ -1484,7 +1734,7 @@ async def membership_admin_overview(user=Depends(require_permission("manage_sess
 @api.get("/membership-admin/packages")
 async def membership_packages(user=Depends(require_permission("manage_sessions"))):
     await _ensure_membership_packages()
-    return await db.membership_packages.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return await db.membership_packages.find({"name": {"$in": ["Bronze", "Silver", "Gold", "Platinum"]}}, {"_id": 0}).sort("price", 1).to_list(4)
 
 @api.post("/membership-admin/packages")
 async def create_membership_package(body: MembershipPackageIn, user=Depends(require_permission("manage_sessions"))):
@@ -1638,7 +1888,8 @@ async def create_managed_member(
         "package_name": package["name"],
         "plan": package["name"].lower(),
         "monthly_fee": float(package["price"]),
-        "daily_minutes": int(package["daily_minutes"]),
+        "daily_minutes": 120,
+        "total_hours": int(package["total_hours"]),
         "payment_method": body.payment_method,
         "payment_amount": round(float(package["price"]), 2),
         "activated_at": iso(now),
@@ -1757,7 +2008,8 @@ async def update_managed_member(
             "package_name": package["name"],
             "plan": package["name"].lower(),
             "monthly_fee": float(package["price"]),
-            "daily_minutes": int(package["daily_minutes"])
+            "daily_minutes": 120,
+            "total_hours": int(package["total_hours"])
         })
 
     result = await db.memberships.update_one(
@@ -1905,7 +2157,17 @@ async def active_sessions(user=Depends(get_current_user)):
             "billing_type": 1,
             "membership_id": 1,
             "membership_usage_cursor": 1,
-            "membership_exhausted": 1
+            "membership_exhausted": 1,
+            "game_type": 1,
+            "game_timer_enabled": 1,
+            "player_count": 1,
+            "rd_selected": 1,
+            "rd_amount": 1,
+            "game_billing_segments": 1,
+            "timer_mode": 1,
+            "timer_remaining_seconds": 1,
+            "timer_started_at": 1,
+            "timer_expired_at": 1
         }
     ).to_list(1000)
 
@@ -1929,6 +2191,8 @@ async def active_sessions(user=Depends(get_current_user)):
     }
     
     for r in rows:
+        if r.get("game_timer_enabled"):
+            r = await _sync_game_timer(r, now_utc())
         if r.get("billing_type") == "membership" and not r.get("is_paused"):
             r = await _settle_membership_usage(r, now_utc())
         if r.get("billing_type") == "membership":
@@ -1975,7 +2239,11 @@ async def active_sessions(user=Depends(get_current_user)):
 
             table_amount += (elapsed_seconds / 3600) * rate
 
-        r["table_amount"] = 0.0 if r.get("billing_type") == "membership" else round(table_amount, 2)
+        if r.get("game_timer_enabled"):
+            r["table_amount"] = _game_timer_amount(r, now_utc())
+            r["timer_played_seconds"] = _game_timer_played_seconds(r, now_utc())
+        else:
+            r["table_amount"] = float(r.get("membership_extra_player_charge", 0)) if r.get("billing_type") == "membership" else round(table_amount, 2)
 
     return rows
 
@@ -2075,8 +2343,21 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         raise HTTPException(status_code=404, detail="Table not found")
     if table["status"] != "available":
         raise HTTPException(status_code=400, detail=f"Table is {table['status']}")
+    game_type = _game_type(table)
+    pricing = await _get_game_pricing()
+    game_timer_enabled = body.billing_type == "normal" and game_type in ("snooker", "mini_snooker", "pool")
+    if game_timer_enabled:
+        duration = int(body.duration_minutes or 30)
+        if game_type == "pool" and duration not in (30, 60):
+            raise HTTPException(status_code=400, detail="Pool packages are 30 or 60 minutes")
+        if game_type in ("snooker", "mini_snooker") and not 2 <= int(body.player_count or 0) <= 6:
+            raise HTTPException(status_code=400, detail="Choose 2 to 6 players")
     membership = None
     if body.billing_type == "membership":
+        if game_type != "ps5":
+            raise HTTPException(status_code=400, detail="Membership can only be used for PS5 sessions")
+        if not 1 <= int(body.player_count or 1) <= 4:
+            raise HTTPException(status_code=400, detail="PS5 membership supports 1 to 4 players")
         if not body.membership_id:
             raise HTTPException(status_code=400, detail="Select a membership")
         membership = await db.memberships.find_one({"id": body.membership_id, "status": "active"}, {"_id": 0})
@@ -2086,9 +2367,12 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         if membership_state["is_expired"]:
             raise HTTPException(status_code=400, detail="Membership has expired")
         if membership_state["remaining_seconds_today"] <= 0:
-            raise HTTPException(status_code=400, detail="Today's membership allowance is exhausted")
+            raise HTTPException(status_code=400, detail="Today's 2-hour membership allowance is exhausted")
+        if membership_state["remaining_total_seconds"] <= 0:
+            raise HTTPException(status_code=400, detail="All purchased membership hours have been used")
         if await db.sessions.find_one({"membership_id": body.membership_id, "status": "active"}):
             raise HTTPException(status_code=409, detail="This member already has an active session")
+    membership_player_charge = ({1: 0, 2: 70, 3: 170, 4: 240}.get(int(body.player_count or 1), 0) if membership else 0)
     session = {
         "id": str(uuid.uuid4()),
         "table_id": table["id"],
@@ -2098,6 +2382,8 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "billing_type": body.billing_type,
         "membership_id": body.membership_id if body.billing_type == "membership" else None,
         "membership_plan": membership.get("plan") if membership else None,
+        "membership_player_count": int(body.player_count or 1) if membership else None,
+        "membership_extra_player_charge": membership_player_charge,
         "membership_usage_cursor": iso(now_utc()) if membership else None,
         "start_time": iso(now_utc()),
         "end_time": None,
@@ -2107,8 +2393,19 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "paused_seconds": 0,
         "pause_reason": None,
         "duration_minutes": 0,
-        "rate_used": float(table["hourly_rate"]),
-        "table_amount": 0.0,
+        "rate_used": float((pricing["ps5"].get("hourly_rate") if pricing["ps5"].get("hourly_rate") is not None else table["hourly_rate"]) if game_type == "ps5" and body.billing_type == "normal" else table["hourly_rate"]),
+        "game_type": game_type,
+        "game_timer_enabled": game_timer_enabled,
+        "player_count": int(body.player_count or 2) if game_type in ("snooker", "mini_snooker") else None,
+        "rd_selected": bool(body.rd_selected) if game_type in ("snooker", "mini_snooker") else False,
+        "rd_amount": float(pricing["rd_price"]) if (game_type in ("snooker", "mini_snooker") and body.rd_selected) else 0.0,
+        "pricing_snapshot": pricing,
+        "game_billing_segments": [_new_fixed_segment(game_type, int(body.player_count or 2), duration, now_utc(), pricing)] if game_timer_enabled else [],
+        "timer_mode": "countdown" if game_timer_enabled else None,
+        "timer_remaining_seconds": duration * 60 if game_timer_enabled else 0,
+        "timer_started_at": iso(now_utc()) if game_timer_enabled else None,
+        "timer_expired_at": None,
+        "table_amount": float(membership_player_charge),
         "snacks": [],
         "snacks_amount": 0.0,
         "discount": 0.0,
@@ -2141,6 +2438,50 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
     session.pop("_id", None)
     session["table"] = table
     return session
+
+@api.post("/sessions/{session_id}/timer/continue")
+async def continue_game_timer(session_id: str, user=Depends(require_permission("manage_sessions"))):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s.get("status") != "active" or not s.get("game_timer_enabled"):
+        raise HTTPException(status_code=400, detail="Active game timer session not found")
+    s = await _sync_game_timer(s, now_utc())
+    if s.get("timer_mode") != "awaiting_decision":
+        raise HTTPException(status_code=409, detail="The current timer has not expired")
+    if _game_type(s) == "pool":
+        raise HTTPException(status_code=400, detail="Pool uses fixed 30 or 60 minute packages")
+    now = now_utc()
+    segments = list(s.get("game_billing_segments", []))
+    pricing = s.get("pricing_snapshot") or await _get_game_pricing()
+    segments.append({"id": str(uuid.uuid4()), "kind": "countup", "elapsed_seconds": 0, "started_at": iso(now), "status": "active", "rate_per_minute": float(pricing.get(_game_type(s), {}).get("extra_minute", 5))})
+    await db.sessions.update_one({"id": session_id}, {"$set": {"timer_mode": "countup", "timer_started_at": iso(now), "timer_remaining_seconds": 0, "game_billing_segments": segments, "timer_expired_at": None}})
+    return await _session_with_details(await db.sessions.find_one({"id": session_id}, {"_id": 0}))
+
+
+@api.post("/sessions/{session_id}/timer/extend")
+async def extend_game_timer(session_id: str, body: TimerExtend, user=Depends(require_permission("manage_sessions"))):
+    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not s or s.get("status") != "active" or not s.get("game_timer_enabled"):
+        raise HTTPException(status_code=400, detail="Active game timer session not found")
+    s = await _sync_game_timer(s, now_utc())
+    if s.get("timer_mode") != "awaiting_decision":
+        raise HTTPException(status_code=409, detail="The current timer has not expired")
+    duration = int(body.duration_minutes)
+    game_type = _game_type(s)
+    if game_type == "pool" and duration not in (30, 60):
+        raise HTTPException(status_code=400, detail="Pool packages are 30 or 60 minutes")
+    if game_type in ("snooker", "mini_snooker") and duration not in (30, 60):
+        raise HTTPException(status_code=400, detail="Choose a 30 or 60 minute extension")
+    now = now_utc()
+    segments = list(s.get("game_billing_segments", []))
+    pricing = s.get("pricing_snapshot") or await _get_game_pricing()
+    segments.append(_new_fixed_segment(game_type, int(s.get("player_count") or 2), duration, now, pricing))
+    await db.sessions.update_one({"id": session_id}, {"$set": {
+        "timer_mode": "countdown", "timer_remaining_seconds": duration * 60,
+        "timer_started_at": iso(now), "timer_expired_at": None,
+        "game_billing_segments": segments,
+    }})
+    return await _session_with_details(await db.sessions.find_one({"id": session_id}, {"_id": 0}))
+
 
 @api.post("/sessions/{session_id}/snacks")
 async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depends(require_permission("manage_sessions"))):
@@ -2273,6 +2614,9 @@ async def pause_session(
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if s.get("game_timer_enabled"):
+        s = await _sync_game_timer(s, now_utc())
+
     if s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
 
@@ -2282,9 +2626,8 @@ async def pause_session(
             detail="Session is already paused"
             )
 
-    # A session can only be manually paused while a frame is running.
-    # If no frame is active, the user must start a frame first.
-    if not s.get("current_frame"):
+    # New game timers are session-based and can be paused even when no frame is active.
+    if not s.get("current_frame") and not s.get("game_timer_enabled"):
         raise HTTPException(
             status_code=400,
             detail="Please start a frame first. You can pause the session only while a frame is running."
@@ -2301,19 +2644,23 @@ async def pause_session(
         if s.get("membership_exhausted"):
             raise HTTPException(status_code=409, detail="Membership daily allowance exhausted")
 
+    pause_now = now_utc()
+    timer_updates = _pause_game_timer(s, pause_now) if s.get("game_timer_enabled") else {}
     await db.sessions.update_one(
         {"id": session_id},
         {
             "$set": {
                 "is_paused": True,
-                "pause_started_at": now_utc().isoformat(),
+                "pause_started_at": iso(pause_now),
                 "pause_reason": reason,
+                **timer_updates,
             }
         },
     )
 
+    s.update(timer_updates)
     s["is_paused"] = True
-    s["pause_started_at"] = now_utc().isoformat()
+    s["pause_started_at"] = iso(pause_now)
     s["pause_reason"] = reason
     s["table"] = await db.tables.find_one(
         {"id": s["table_id"]},
@@ -2363,6 +2710,8 @@ async def resume_session(
             + pause_duration
         )
 
+    resume_now = now_utc()
+    timer_updates = _resume_game_timer(s, resume_now) if s.get("game_timer_enabled") else {}
     await db.sessions.update_one(
         {"id": session_id},
         {
@@ -2372,7 +2721,8 @@ async def resume_session(
                 "paused_seconds": paused_seconds,
                 "pause_reason": None,
                 "current_frame": current_frame,
-                **({"membership_usage_cursor": iso(now_utc())} if s.get("billing_type") == "membership" else {}),
+                **timer_updates,
+                **({"membership_usage_cursor": iso(resume_now)} if s.get("billing_type") == "membership" else {}),
             }
         },
     )
@@ -2382,6 +2732,7 @@ async def resume_session(
     s["paused_seconds"] = paused_seconds
     s["pause_reason"] = None
     s["current_frame"] = current_frame
+    s.update(timer_updates)
     s["table"] = await db.tables.find_one(
         {"id": s["table_id"]},
         {"_id": 0}
@@ -2405,6 +2756,8 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
+    if s.get("game_timer_enabled"):
+        s = await _sync_game_timer(s, now_utc())
     end = now_utc() 
     start = datetime.fromisoformat(s["start_time"])
     paused_seconds = float(s.get("paused_seconds", 0))
@@ -2481,7 +2834,14 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
     "current_frame_amount": cf["amount"] if cf else None,
     "table_amount_raw": table_amount_raw,
 })
-    table_amount = 0.0 if s.get("billing_type") == "membership" else round(table_amount_raw, 2)
+    if s.get("game_timer_enabled"):
+        duration_seconds = _game_timer_played_seconds(s, end)
+        duration_minutes = int(duration_seconds / 60)
+        table_amount = _game_timer_amount(s, end)
+        if cf:
+            cf["amount"] = 0.0
+    else:
+        table_amount = float(s.get("membership_extra_player_charge", 0)) if s.get("billing_type") == "membership" else round(table_amount_raw, 2)
     # Calculate snack amount directly from the actual session items
     snacks_amount = round(
         sum(
@@ -2490,7 +2850,14 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
         ),
         2,
     )
-    grand_total_exact = round(table_amount + snacks_amount, 2)
+    rd_amount = (
+        round(float(s.get("rd_amount") or 0), 2)
+        if s.get("rd_selected") and _game_type(s) in ("snooker", "mini_snooker")
+        else 0.0
+    )
+    # Timer billing helper already includes RD in table_amount; classic frame billing does not.
+    rd_additional = 0.0 if s.get("game_timer_enabled") else rd_amount
+    grand_total_exact = round(table_amount + rd_additional + snacks_amount, 2)
     grand_total = int(round(grand_total_exact))
     await _session_with_details(s)
     # Strip any legacy preview_* fields that may exist from before this refactor
@@ -2504,6 +2871,7 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
             "duration_seconds": int(duration_seconds),
             "duration_minutes": duration_minutes,
             "table_amount": table_amount,
+            "rd_amount": rd_amount,
             "snacks_amount": snacks_amount,
             "grand_total_exact": grand_total_exact,
             "grand_total": grand_total,
@@ -2515,6 +2883,8 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
+    if s.get("game_timer_enabled"):
+        s = await _sync_game_timer(s, now_utc())
     if s.get("billing_type") == "membership" and not s.get("is_paused"):
         s = await _settle_membership_usage(s, now_utc())
     # Determine authoritative end timestamp
@@ -2593,8 +2963,14 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         frames.append(frame)
 
     # Table amount: sum of frame amounts if any, else full duration × rate
-    if s.get("billing_type") == "membership":
-        table_amount = 0.0
+    if s.get("game_timer_enabled"):
+        duration_seconds = _game_timer_played_seconds(s, end)
+        duration_minutes = int(duration_seconds / 60)
+        table_amount = _game_timer_amount(s, end)
+        for frame in frames:
+            frame["amount"] = 0.0
+    elif s.get("billing_type") == "membership":
+        table_amount = float(s.get("membership_extra_player_charge", 0))
     elif frames:
         table_amount = round(sum(float(f.get("amount", 0)) for f in frames), 2)
     else:
@@ -2613,7 +2989,14 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
     )
     discount = float(body.discount or 0)
     tax_percent = float(body.tax_percent or 0)
-    subtotal = table_amount + snacks_amount - discount
+    rd_amount = (
+        round(float(s.get("rd_amount") or 0), 2)
+        if s.get("rd_selected") and _game_type(s) in ("snooker", "mini_snooker")
+        else 0.0
+    )
+    # Avoid charging RD twice for timer sessions, where _game_timer_amount includes it.
+    rd_additional = 0.0 if s.get("game_timer_enabled") else rd_amount
+    subtotal = table_amount + rd_additional + snacks_amount - discount
     tax_amount = round(subtotal * tax_percent / 100, 2)
     grand_total_exact = round(subtotal + tax_amount, 2)
     grand_total = int(round(grand_total_exact))  # nearest whole rupee — frozen
@@ -2640,6 +3023,7 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         "end_time": iso(end),
         "duration_minutes": duration_minutes,
         "table_amount": table_amount,
+        "rd_amount": rd_amount,
         "discount": discount,
         "tax_percent": tax_percent,
         "tax_amount": tax_amount,
@@ -2648,6 +3032,7 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         "status": "completed",
         "frames": frames,
         "current_frame": None,
+        "rd_selected": bool(s.get("rd_selected")),
         "invoice_no": invoice_no,
         "ended_at": iso(end),
         "payment_method": primary_method,
@@ -2860,7 +3245,7 @@ async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permis
     dur_sec = max(0, elapsed - frame_paused)
 
     frame["duration_minutes"] = int(dur_sec / 60)
-    frame["amount"] = round(
+    frame["amount"] = 0.0 if s.get("game_timer_enabled") else round(
         (dur_sec / 3600.0) * float(s.get("rate_used", 0)),
         2,
     )
