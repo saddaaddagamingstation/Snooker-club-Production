@@ -798,7 +798,16 @@ async def create_category(body: CategoryIn, user=Depends(require_permission("man
 # ---- Snacks ----
 @api.get("/snacks")
 async def list_snacks(user=Depends(get_current_user)):
-    snacks = await db.snacks.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+    await client.admin.command("ping")
+
+    print("SNACK DEBUG - DATABASE:", db.name)
+    print("SNACK DEBUG - COLLECTIONS:", await db.list_collection_names())
+    print("SNACK DEBUG - DOCUMENT COUNT:", await db.snacks.count_documents({}))
+
+    snacks = await db.snacks.find(
+        {}, {"_id": 0}
+    ).sort("name", 1).to_list(1000)
+
     return snacks
 
 @api.post("/snacks")
@@ -3245,10 +3254,6 @@ async def reports(
         2
     )
 
-    avg_duration = round(
-        sum(s.get("duration_minutes", 0) for s in sessions) / total_sessions,
-        1
-    ) if total_sessions else 0
     avg_duration = round(sum(s.get("duration_minutes", 0) for s in sessions) / total_sessions, 1) if total_sessions else 0
     # best tables
     table_totals = {}
@@ -3358,7 +3363,7 @@ async def reports(
 
         snack_list = []
         total_qty = 0
-
+        snack_detail_revenue = 0
         for item in items:
             quantity = int(item.get("quantity", 0))
             revenue = float(item.get("subtotal", 0))
