@@ -796,13 +796,14 @@ async def create_category(body: CategoryIn, user=Depends(require_permission("man
     return category
 
 # ---- Snacks ----
+
 @api.get("/snacks")
 async def list_snacks(user=Depends(get_current_user)):
     await client.admin.command("ping")
 
-    print("SNACK DEBUG - DATABASE:", db.name)
-    print("SNACK DEBUG - COLLECTIONS:", await db.list_collection_names())
-    print("SNACK DEBUG - DOCUMENT COUNT:", await db.snacks.count_documents({}))
+    print("DB NAME EXACT:", repr(db.name))
+    print("DB NAME LENGTH:", len(db.name))
+    print("SNACK COUNT:", await db.snacks.count_documents({}))
 
     snacks = await db.snacks.find(
         {}, {"_id": 0}
