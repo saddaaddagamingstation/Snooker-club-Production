@@ -146,6 +146,8 @@ export default function Tables() {
           table_id: startModal.id,
           customer_name: form.customer_name,
           notes: form.notes,
+          billing_type: form.billing_type || "normal",
+          membership_id: form.billing_type === "membership" ? form.membership_id : null,
         });
 
         data = response.data;
@@ -470,7 +472,17 @@ function TableForm({ initial, onSubmit }) {
 }
 
 function StartSessionForm({ table, onSubmit, foodOrderId }) {
-  const [f, setF] = useState({ customer_name: "", notes: "" });
+  const [f, setF] = useState({ customer_name: "", notes: "", billing_type: "normal", membership_id: "" });
+  const [memberships, setMemberships] = useState([]);
+  const refreshMemberships = async () => {
+    const r = await api.get("/memberships");
+    setMemberships(r.data || []);
+  };
+  useEffect(() => {
+    if (foodOrderId) return;
+    refreshMemberships().catch(() => setMemberships([]));
+  }, [foodOrderId]);
+  const selectedMembership = memberships.find((m) => m.id === f.membership_id);
   return (
     <form
       onSubmit={(e) => {
@@ -480,6 +492,19 @@ function StartSessionForm({ table, onSubmit, foodOrderId }) {
       className="space-y-4"
       data-testid="start-session-form"
     >
+      {!foodOrderId && (
+        <Field label="Billing Type">
+          <select
+            value={f.billing_type}
+            onChange={(e) => setF({ ...f, billing_type: e.target.value, membership_id: "" })}
+            className="form-input"
+          >
+            <option value="normal">Normal hourly billing</option>
+            <option value="membership">Membership</option>
+          </select>
+        </Field>
+      )}
+      {f.billing_type === "normal" || foodOrderId ? (
       <div className="p-4 rounded-xl bg-[#0f0f0f] border border-[#262626]">
         <div className="text-xs uppercase tracking-wider text-gray-500">
           Hourly Rate (locked)
@@ -491,6 +516,36 @@ function StartSessionForm({ table, onSubmit, foodOrderId }) {
           Auto-fetched from table settings
         </div>
       </div>
+      ) : (
+        <div className="space-y-3">
+          <Field label="Select Membership">
+            <select
+              value={f.membership_id}
+              onChange={(e) => setF({ ...f, membership_id: e.target.value })}
+              className="form-input"
+              required
+            >
+              <option value="">Choose member</option>
+              {memberships.filter((m) => !m.is_expired && m.remaining_seconds_today > 0).map((m) => (
+                <option key={m.id} value={m.id}>{m.member_name} · {m.plan} · {Math.floor(m.remaining_seconds_today / 60)} min left</option>
+              ))}
+            </select>
+          </Field>
+          <p className="text-xs text-gray-500">
+            New memberships can only be created from Membership Management.
+          </p>
+          {selectedMembership && (
+            <div className="p-4 rounded-xl bg-[#0f0f0f] border border-green-800/50 text-sm space-y-1">
+              <div className="font-semibold text-green-400">{selectedMembership.plan} Membership</div>
+              <div>Daily allowance: {selectedMembership.daily_minutes} minutes</div>
+              <div>Used today: {Math.floor(selectedMembership.used_seconds_today / 60)} minutes</div>
+              <div>Remaining today: {Math.floor(selectedMembership.remaining_seconds_today / 60)} minutes</div>
+              <div>Expires: {new Date(selectedMembership.expires_at).toLocaleDateString("en-IN")}</div>
+            </div>
+          )}
+          {memberships.length === 0 && <p className="text-sm text-amber-400">No active memberships found. Add a member first.</p>}
+        </div>
+      )}
       <Field label="Customer Name (optional)">
         <input
           value={f.customer_name}
@@ -511,8 +566,9 @@ function StartSessionForm({ table, onSubmit, foodOrderId }) {
       </Field>
       <button
         type="submit"
+        disabled={f.billing_type === "membership" && !f.membership_id}
         data-testid="confirm-start-session"
-        className="w-full h-12 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold"
+        className="w-full h-12 rounded-xl bg-green-700 hover:bg-green-800 disabled:opacity-40 text-white font-semibold"
       >
         Start Session
       </button>

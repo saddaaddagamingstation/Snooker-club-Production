@@ -1,4 +1,4 @@
-import { Outlet, NavLink, Link, useNavigate } from "react-router-dom";
+import { Outlet, NavLink, Link, useNavigate, } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
 import {
   LayoutDashboard,
@@ -12,6 +12,7 @@ import {
   Menu,
   X,
   Wallet,
+  UsersRound,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import api from "@/lib/api";
@@ -30,6 +31,12 @@ const navItems = [
     icon: Grid3x3,
     label: "Tables",
     perm: null,
+  },
+  {
+    to: "/memberships",
+    icon: Users,
+    label: "Membership",
+    perm: "manage_sessions",
   },
   {
     to: "/sessions",

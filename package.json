@@ -1,5 +1,6 @@
 {
   "dependencies": {
-    "react-day-picker": "^10.0.1"
+    "react-day-picker": "^10.0.1",
+    "react-phone-input-2": "^2.15.1"
   }
 }

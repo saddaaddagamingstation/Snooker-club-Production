@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import api, { inr, inrRounded, formatApiErrorDetail } from "@/lib/api";
 import {
@@ -172,6 +172,8 @@ export default function Sessions() {
   const [frameModalSession, setFrameModalSession] = useState(null);
   const [frameEndPausedSessionId, setFrameEndPausedSessionId] = useState(null);
   const [clearSessionTarget, setClearSessionTarget] = useState(null);
+  const [exhaustionTarget, setExhaustionTarget] = useState(null);
+  const dismissedExhaustionIdRef = useRef(null);
   const navigate = useNavigate();
 
   const load = async () => {
@@ -181,6 +183,9 @@ export default function Sessions() {
     ]);
     setSessions(s.data);
     setSnacks(sn.data);
+    const exhausted = (s.data || []).find((x) => x.membership_exhausted && x.id !== dismissedExhaustionIdRef.current);
+    if (exhausted) setExhaustionTarget(exhausted);
+    else setExhaustionTarget(null);
   };
   useEffect(() => {
     load();
@@ -419,7 +424,7 @@ export default function Sessions() {
             s.is_paused,
             s.pause_started_at,
           );
-          const tableAmount = e.tableAmount;
+          const tableAmount = s.billing_type === "membership" ? 0 : e.tableAmount;
           const snacksAmount = (s.snacks || []).reduce(
             (total, item) =>
               total +
@@ -430,6 +435,9 @@ export default function Sessions() {
             0,
           );
           const bill = tableAmount + snacksAmount;
+          const membershipRemaining = s.membership_state
+            ? Math.max(0, Math.floor(Number(s.membership_state.remaining_seconds_today || 0) - (!s.is_paused && s.membership_state.as_of ? (Date.now() - new Date(s.membership_state.as_of).getTime()) / 1000 : 0)))
+            : 0;
           return (
             <div
               key={s.id}
@@ -449,18 +457,27 @@ export default function Sessions() {
                     </span>
                   </div>
                   <div className="text-sm text-gray-400 mt-1">
-                    {s.customer_name || "Walk-in"} · @{inr(s.rate_used)}/hr
+                    {s.customer_name || "Walk-in"} · {s.billing_type === "membership" ? `${s.membership_state?.plan || "Membership"} · ${s.membership_state?.member_name || "Member"}` : `@${inr(s.rate_used)}/hr`}
                   </div>
                 </div>
                 <div className="text-right">
                   <div className="text-xs uppercase tracking-wider text-gray-500">
-                    Elapsed
+                    {s.billing_type === "membership" ? "Daily time left" : "Elapsed"}
                   </div>
                   <div className="text-3xl font-mono font-bold text-amber-300">
-                    {e.display}
+                    {s.billing_type === "membership" ? `${String(Math.floor(membershipRemaining / 60)).padStart(2, "0")}:${String(membershipRemaining % 60).padStart(2, "0")}` : e.display}
                   </div>
                 </div>
               </div>
+              {s.billing_type === "membership" && (
+                <div className="px-6 pt-4 text-sm text-gray-300">
+                  <span className="text-green-400 font-semibold">Membership play</span>
+                  <span className="mx-2">·</span>
+                  {Math.floor((s.membership_state?.used_seconds_today || 0) / 60)} min used of {s.membership_state?.daily_minutes || 0} min today
+                  <span className="mx-2">·</span>
+                  Expires {s.membership_state?.expires_at ? new Date(s.membership_state.expires_at).toLocaleDateString("en-IN") : "—"}
+                </div>
+              )}
               <div className="p-6 grid grid-cols-3 gap-3">
                 <Stat label="Table" value={inr(tableAmount)} />
                 <Stat label="Snacks" value={inr(snacksAmount)} />
@@ -601,6 +618,44 @@ export default function Sessions() {
           );
         })}
       </div>
+
+      {exhaustionTarget && (
+        <div className="fixed inset-0 z-[70] bg-black/80 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl border border-amber-500/40 bg-[#141414] p-6 space-y-4">
+            <h3 className="text-xl font-bold text-amber-300">Daily membership time finished</h3>
+            <p className="text-sm text-gray-300">
+              {exhaustionTarget.membership_state?.member_name || exhaustionTarget.customer_name || "Member"} has used today's membership allowance on Table {exhaustionTarget.table_number}.
+              The membership timer is paused. Choose how to proceed.
+            </p>
+            <div className="flex gap-3">
+              <button
+                className="flex-1 h-11 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold"
+                onClick={async () => {
+                  try {
+                    dismissedExhaustionIdRef.current = exhaustionTarget.id;
+                    await api.post(`/sessions/${exhaustionTarget.id}/continue-normal`);
+                    toast.success("Membership finished. Normal billing started.");
+                    setExhaustionTarget(null);
+                    await load();
+                  } catch (e) {
+                    toast.error(formatApiErrorDetail(e.response?.data?.detail));
+                  }
+                }}
+              >Continue with normal billing</button>
+              <button
+                className="flex-1 h-11 rounded-xl border border-[#444] bg-[#222] text-white font-semibold"
+                onClick={async () => {
+                  const target = exhaustionTarget;
+                  dismissedExhaustionIdRef.current = target.id;
+                  setExhaustionTarget(null);
+                  try { await openEndModal(target); }
+                  catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail)); }
+                }}
+              >Stop and close</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {addSnack && (
         <Modal

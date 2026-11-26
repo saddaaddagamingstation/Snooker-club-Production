@@ -1,5 +1,7 @@
 import asyncio
 import time
+import secrets
+from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
 from pathlib import Path
 from typing import Literal
@@ -10,7 +12,9 @@ import os
 import uuid
 import logging
 import secrets
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+import calendar
 from typing import List, Optional
 
 import bcrypt
@@ -29,6 +33,10 @@ db = client[os.environ['DB_NAME']]
 JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALG = "HS256"
 CLUB_NAME = os.environ.get('CLUB_NAME', 'Sadda Adda Snooker')
+try:
+    CLUB_TIMEZONE = ZoneInfo(os.environ.get('CLUB_TIMEZONE', 'Asia/Kolkata'))
+except Exception:
+    CLUB_TIMEZONE = ZoneInfo('Asia/Kolkata')
 
 app = FastAPI(title="Sadda Adda Snooker API")
 api = APIRouter(prefix="/api")
@@ -114,6 +122,26 @@ def create_token(user_id: str, email: str, role: str, days: int = 7) -> str:
 def now_utc():
     return datetime.now(timezone.utc)
 
+def local_now():
+    return now_utc().astimezone(CLUB_TIMEZONE)
+
+
+def local_day_range(day=None):
+    day = day or local_now().date()
+
+    start_local = datetime.combine(
+        day,
+        datetime.min.time(),
+        tzinfo=CLUB_TIMEZONE
+    )
+
+    end_local = start_local + timedelta(days=1)
+
+    return (
+        start_local.astimezone(timezone.utc),
+        end_local.astimezone(timezone.utc)
+    )
+
 def iso(dt: datetime) -> str:
     return dt.isoformat()
 
@@ -162,6 +190,32 @@ class SessionStart(BaseModel):
     table_id: str
     customer_name: Optional[str] = ""
     notes: Optional[str] = ""
+    billing_type: Literal["normal", "membership"] = "normal"
+    membership_id: Optional[str] = None
+
+class MembershipCreate(BaseModel):
+    member_name: str
+    phone: Optional[str] = ""
+    plan: Literal["silver", "gold"]
+
+class MembershipPackageIn(BaseModel):
+    name: str
+    price: float = Field(ge=0)
+    daily_minutes: int = Field(gt=0)
+    description: Optional[str] = ""
+    is_active: bool = True
+
+class ManagedMemberIn(BaseModel):
+    member_name: str
+    phone: str
+    package_id: str
+    payment_method: Literal["cash", "upi", "card", "bank", "credit"] = "cash"
+
+class ManagedMemberUpdate(BaseModel):
+    member_name: Optional[str] = None
+    phone: Optional[str] = None
+    package_id: Optional[str] = None
+    status: Optional[Literal["active", "inactive"]] = None
 
 class SnackOrderItem(BaseModel):
     snack_id: str
@@ -1244,6 +1298,12 @@ async def list_sessions(
     }
 
     for r in rows:
+        if r.get("billing_type") == "membership":
+            r = await _settle_membership_usage(r, now_utc())
+        if r.get("billing_type") == "membership":
+            membership = await db.memberships.find_one({"id": r.get("membership_id")}, {"_id": 0})
+            if membership:
+                r["membership_state"] = await _membership_status(membership)
         r["table"] = table_map.get(r.get("table_id"))
         r["snacks_total"] = sum(
             item.get("subtotal", 0)
@@ -1251,6 +1311,561 @@ async def list_sessions(
         )
 
     return rows
+def _membership_local_now():
+    return now_utc().astimezone(CLUB_TIMEZONE)
+
+
+def _membership_expiry(activated_at):
+    """Membership expires exactly 30 days after activation."""
+    return activated_at + timedelta(days=30)
+
+def _membership_day_key(dt):
+    return dt.astimezone(CLUB_TIMEZONE).date().isoformat()
+
+
+def _membership_plan(plan):
+    return {"silver": {"monthly_fee": 3000, "daily_minutes": 60},
+            "gold": {"monthly_fee": 5000, "daily_minutes": 120}}[plan]
+
+
+async def _settle_membership_usage(session, until=None):
+    """Accrue only unpaused membership play time, split at club-local midnight."""
+    if session.get("billing_type") != "membership" or session.get("status") != "active":
+        return session
+    membership_id = session.get("membership_id")
+    cursor_raw = session.get("membership_usage_cursor") or session.get("start_time")
+    if not membership_id or not cursor_raw:
+        return session
+    membership = await db.memberships.find_one({"id": membership_id})
+    if not membership:
+        raise HTTPException(status_code=409, detail="Membership record not found")
+    cursor = datetime.fromisoformat(cursor_raw)
+    end = until or now_utc()
+    requested_end = end
+    expiry = datetime.fromisoformat(membership["expires_at"])
+    if session.get("is_paused"):
+        if now_utc() >= expiry and not session.get("membership_exhausted"):
+            await db.sessions.update_one({"id": session["id"]}, {"$set": {"membership_exhausted": True, "pause_reason": "MEMBERSHIP_EXPIRED"}})
+            session.update({"membership_exhausted": True, "pause_reason": "MEMBERSHIP_EXPIRED"})
+        return session
+    if cursor >= expiry:
+        await db.sessions.update_one({"id": session["id"]}, {"$set": {
+            "is_paused": True, "pause_started_at": iso(expiry),
+            "pause_reason": "MEMBERSHIP_EXPIRED", "membership_exhausted": True,
+            "membership_usage_cursor": iso(expiry),
+        }})
+        session.update({"is_paused": True, "pause_started_at": iso(expiry), "pause_reason": "MEMBERSHIP_EXPIRED", "membership_exhausted": True, "membership_usage_cursor": iso(expiry)})
+        return session
+    end = min(end, expiry)
+    if end <= cursor:
+        return session
+    usage = dict(membership.get("daily_usage") or {})
+    remaining_seconds = (end - cursor).total_seconds()
+    point = cursor
+    exhausted_at = expiry if requested_end > expiry else None
+    daily_cap = int(membership.get("daily_minutes", 0)) * 60
+    while remaining_seconds > 0:
+        local_point = point.astimezone(CLUB_TIMEZONE)
+        next_midnight_local = (local_point.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+        next_midnight_utc = next_midnight_local.astimezone(timezone.utc)
+        segment_end = min(end, next_midnight_utc)
+        segment_seconds = max(0, (segment_end - point).total_seconds())
+        key = _membership_day_key(point)
+        already_used = float(usage.get(key, 0))
+        available = max(0.0, daily_cap - already_used)
+        credited = min(segment_seconds, available)
+        usage[key] = already_used + credited
+        if credited < segment_seconds:
+            exhausted_at = point + timedelta(seconds=credited)
+            break
+        point = segment_end
+        remaining_seconds -= segment_seconds
+    if not exhausted_at and point == end and end.astimezone(CLUB_TIMEZONE).date() == (end - timedelta(microseconds=1)).astimezone(CLUB_TIMEZONE).date():
+        final_key = _membership_day_key(end - timedelta(microseconds=1))
+        if float(usage.get(final_key, 0)) >= daily_cap:
+            exhausted_at = end
+    cursor_to_store = exhausted_at or end
+    await db.memberships.update_one({"id": membership_id}, {"$set": {"daily_usage": usage}})
+    session_update = {"membership_usage_cursor": iso(cursor_to_store)}
+    if exhausted_at:
+        reason = "MEMBERSHIP_EXPIRED" if exhausted_at == expiry else "MEMBERSHIP_EXHAUSTED"
+        session_update.update({"is_paused": True, "pause_started_at": iso(exhausted_at), "pause_reason": reason, "membership_exhausted": True})
+    await db.sessions.update_one({"id": session["id"]}, {"$set": session_update})
+    session.update(session_update)
+    return session
+
+
+async def _membership_status(membership, at=None):
+    at = at or now_utc()
+    local = at.astimezone(CLUB_TIMEZONE)
+    key = local.date().isoformat()
+    allowance = int(membership.get("daily_minutes", 0)) * 60
+    used = float((membership.get("daily_usage") or {}).get(key, 0))
+    expiry = datetime.fromisoformat(membership["expires_at"])
+    return {
+        "membership_id": membership["id"],
+        "member_name": membership.get("member_name", ""),
+        "phone": membership.get("phone", ""),
+        "plan": membership.get("plan", "").title(),
+        "monthly_fee": membership.get("monthly_fee", 0),
+        "daily_minutes": membership.get("daily_minutes", 0),
+        "expires_at": membership["expires_at"],
+        "is_expired": at > expiry or membership.get("status") != "active",
+        "used_seconds_today": int(used),
+        "remaining_seconds_today": max(0, int(allowance - used)),
+        "as_of": iso(at),
+    }
+
+
+@api.get("/memberships")
+async def list_memberships(user=Depends(get_current_user)):
+    rows = await db.memberships.find({"status": "active"}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    result = []
+    for membership in rows:
+        result.append({**membership, **(await _membership_status(membership))})
+    return result
+
+
+@api.post("/memberships")
+async def create_membership(body: MembershipCreate, user=Depends(require_permission("manage_sessions"))):
+    name = body.member_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Member name is required")
+    now = _membership_local_now()
+    plan = _membership_plan(body.plan)
+    membership = {
+        "id": str(uuid.uuid4()), "member_name": name, "phone": (body.phone or "").strip(),
+        "plan": body.plan, **plan, "activated_at": iso(now),
+        "expires_at": iso(_membership_expiry(now)), "status": "active",
+        "daily_usage": {}, "created_at": iso(now_utc()), "created_by": user["id"],
+    }
+    await db.memberships.insert_one(membership.copy())
+    membership.pop("_id", None)
+    return {**membership, **(await _membership_status(membership))}
+
+
+# ---- Membership administration ----
+async def _ensure_membership_packages():
+    if await db.membership_packages.count_documents({}) == 0:
+        now = iso(now_utc())
+        await db.membership_packages.insert_many([
+            {"id": str(uuid.uuid4()), "name": "Silver", "price": 3000,
+             "daily_minutes": 60, "description": "60 minutes daily", "is_active": True,
+             "created_at": now, "updated_at": now},
+            {"id": str(uuid.uuid4()), "name": "Gold", "price": 5000,
+             "daily_minutes": 120, "description": "120 minutes daily", "is_active": True,
+             "created_at": now, "updated_at": now},
+        ])
+
+@api.get("/membership-admin/overview")
+async def membership_admin_overview(user=Depends(require_permission("manage_sessions"))):
+    await _ensure_membership_packages()
+    members = await db.memberships.find({}, {"_id": 0}).to_list(5000)
+    now = now_utc()
+    active = [m for m in members if m.get("status") == "active" and datetime.fromisoformat(m["expires_at"]) >= now]
+    expired = [m for m in members if m.get("status") != "active" or datetime.fromisoformat(m["expires_at"]) < now]
+    month_prefix = _membership_local_now().strftime("%Y-%m")
+    collected = sum(float(m.get("monthly_fee", 0)) for m in members if str(m.get("activated_at", "")).startswith(month_prefix))
+    recent = sorted(members, key=lambda m: m.get("created_at", ""), reverse=True)[:6]
+    expiring = sorted([m for m in active if (datetime.fromisoformat(m["expires_at"]) - now).days <= 7], key=lambda m: m.get("expires_at", ""))[:6]
+    return {"total_members": len(members), "active_members": len(active), "expired_members": len(expired),
+            "monthly_collection": round(collected, 2), "recent_members": recent, "expiring_soon": expiring}
+
+@api.get("/membership-admin/packages")
+async def membership_packages(user=Depends(require_permission("manage_sessions"))):
+    await _ensure_membership_packages()
+    return await db.membership_packages.find({}, {"_id": 0}).sort("created_at", -1).to_list(500)
+
+@api.post("/membership-admin/packages")
+async def create_membership_package(body: MembershipPackageIn, user=Depends(require_permission("manage_sessions"))):
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Package name is required")
+    await _ensure_membership_packages()
+    if await db.membership_packages.find_one({"name": {"$regex": f"^{name}$", "$options": "i"}}):
+        raise HTTPException(status_code=409, detail="A package with this name already exists")
+    now = iso(now_utc())
+    item = {"id": str(uuid.uuid4()), **body.dict(), "name": name, "created_at": now, "updated_at": now}
+    await db.membership_packages.insert_one(item.copy())
+    item.pop("_id", None)
+    return item
+
+@api.put("/membership-admin/packages/{package_id}")
+async def update_membership_package(package_id: str, body: MembershipPackageIn, user=Depends(require_permission("manage_sessions"))):
+    item = await db.membership_packages.find_one({"id": package_id})
+    if not item:
+        raise HTTPException(status_code=404, detail="Package not found")
+    values = body.dict()
+    values["name"] = values["name"].strip()
+    values["updated_at"] = iso(now_utc())
+    await db.membership_packages.update_one({"id": package_id}, {"$set": values})
+    return await db.membership_packages.find_one({"id": package_id}, {"_id": 0})
+
+@api.post("/membership-admin/packages/{package_id}/activate")
+async def activate_membership_package(
+    package_id: str,
+    user=Depends(require_permission("manage_sessions"))
+):
+    result = await db.membership_packages.update_one(
+        {"id": package_id},
+        {
+            "$set": {
+                "is_active": True,
+                "updated_at": iso(now_utc())
+            }
+        }
+    )
+
+    if not result.matched_count:
+        raise HTTPException(status_code=404, detail="Package not found")
+
+    return {
+        "ok": True,
+        "message": "Package activated"
+    }
+
+
+@api.post("/membership-admin/packages/{package_id}/deactivate")
+async def deactivate_membership_package(
+    package_id: str,
+    user=Depends(require_permission("manage_sessions"))
+):
+    result = await db.membership_packages.update_one(
+        {"id": package_id},
+        {
+            "$set": {
+                "is_active": False,
+                "updated_at": iso(now_utc())
+            }
+        }
+    )
+
+    if not result.matched_count:
+        raise HTTPException(
+            status_code=404,
+            detail="Package not found"
+        )
+
+    return {
+        "ok": True,
+        "message": "Package deactivated"
+    }
+
+@api.delete("/membership-admin/packages/{package_id}")
+async def delete_membership_package(
+    package_id: str,
+    user=Depends(require_permission("manage_sessions"))
+):
+    package = await db.membership_packages.find_one({"id": package_id})
+
+    if not package:
+        raise HTTPException(
+            status_code=404,
+            detail="Package not found"
+        )
+
+    # Never delete a package that has been assigned to a member.
+    member_count = await db.memberships.count_documents({
+        "package_id": package_id
+    })
+
+    if member_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete this package. {member_count} membership record(s) are linked to it. Deactivate it instead."
+        )
+
+    await db.membership_packages.delete_one({"id": package_id})
+
+    return {
+        "ok": True,
+        "message": "Package deleted successfully"
+    }
+
+@api.get("/membership-admin/members")
+async def managed_members(user=Depends(require_permission("manage_sessions"))):
+    rows = await db.memberships.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
+    result = []
+    for m in rows:
+        state = await _membership_status(m)
+        result.append({**m, **state, "member_id": m.get("member_id", m.get("id"))})
+    return result
+
+@api.post("/membership-admin/members")
+async def create_managed_member(
+    body: ManagedMemberIn,
+    user=Depends(require_permission("manage_sessions"))
+):
+    await _ensure_membership_packages()
+
+    package = await db.membership_packages.find_one(
+        {"id": body.package_id, "is_active": True},
+        {"_id": 0}
+    )
+
+    if not package:
+        raise HTTPException(status_code=404, detail="Active package not found")
+
+    name = body.member_name.strip()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="Member name is required")
+
+    # Guarantee unique member codes at database level
+    await db.memberships.create_index(
+        "member_id",
+        unique=True,
+        partialFilterExpression={"member_id": {"$type": "string"}}
+    )
+    now = _membership_local_now()
+    expiry = _membership_expiry(now)
+
+    member = {
+        "id": str(uuid.uuid4()),
+        "member_name": name,
+        "phone": body.phone.strip(),
+        "package_id": package["id"],
+        "package_name": package["name"],
+        "plan": package["name"].lower(),
+        "monthly_fee": float(package["price"]),
+        "daily_minutes": int(package["daily_minutes"]),
+        "payment_method": body.payment_method,
+        "payment_amount": round(float(package["price"]), 2),
+        "activated_at": iso(now),
+        "expires_at": iso(expiry),
+        "status": "active",
+        "daily_usage": {},
+        "created_at": iso(now_utc()),
+        "created_by": user["id"]
+    }
+
+    # Retry if a randomly generated code already exists
+    for attempt in range(20):
+        member["member_id"] = f"M{secrets.randbelow(90000) + 10000}"
+
+        try:
+            await db.memberships.insert_one(member.copy())
+            break
+        except DuplicateKeyError:
+            if attempt == 19:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not generate a unique member ID. Please try again."
+                )
+
+    # Record the membership purchase in the same payments collection used by
+    # session and food-order payments.
+    payment_amount = round(float(package["price"]), 2)
+    payment_id = None
+    if payment_amount > 0:
+        payment_id = str(uuid.uuid4())
+        payment_invoice = (
+            "MEM-"
+            + now_utc().strftime("%Y%m%d")
+            + "-"
+            + member["id"][:6].upper()
+        )
+        payment_doc = {
+            "id": payment_id,
+            "membership_id": member["id"],
+            "source_type": "membership",
+            "source_id": member["id"],
+            "invoice_no": payment_invoice,
+            "amount": payment_amount,
+            "method": body.payment_method,
+            "table_number": "Membership",
+            "customer_name": name,
+            "package_name": package["name"],
+            "created_at": iso(now_utc()),
+        }
+        try:
+            await db.payments.insert_one(payment_doc.copy())
+        except Exception:
+            # Do not leave a newly-created membership without its payment record.
+            await db.memberships.delete_one({"id": member["id"]})
+            logger.exception("Failed to record membership payment")
+            raise HTTPException(
+                status_code=500,
+                detail="Membership was not created because its payment could not be recorded. Please try again."
+            )
+        await db.memberships.update_one(
+            {"id": member["id"]},
+            {"$set": {
+                "payment_id": payment_id,
+                "payment_invoice": payment_invoice,
+                "paid_at": payment_doc["created_at"],
+            }}
+        )
+        member.update({
+            "payment_id": payment_id,
+            "payment_invoice": payment_invoice,
+            "paid_at": payment_doc["created_at"],
+        })
+
+    member.pop("_id", None)
+
+    return {
+        **member,
+        **(await _membership_status(member))
+    }
+
+@api.put("/membership-admin/members/{member_id}")
+async def update_managed_member(
+    member_id: str,
+    body: ManagedMemberUpdate,
+    user=Depends(require_permission("manage_sessions"))
+):
+    values = {
+        k: v
+        for k, v in body.dict(exclude_unset=True).items()
+        if v is not None
+    }
+
+    if not values:
+        raise HTTPException(status_code=400, detail="No changes supplied")
+
+    if "member_name" in values:
+        values["member_name"] = values["member_name"].strip()
+
+        if not values["member_name"]:
+            raise HTTPException(status_code=400, detail="Member name is required")
+
+    if "phone" in values:
+        values["phone"] = values["phone"].strip()
+
+    # Update package details together
+    if "package_id" in values:
+        package = await db.membership_packages.find_one(
+            {"id": values["package_id"], "is_active": True},
+            {"_id": 0}
+        )
+
+        if not package:
+            raise HTTPException(status_code=404, detail="Active package not found")
+
+        values.update({
+            "package_name": package["name"],
+            "plan": package["name"].lower(),
+            "monthly_fee": float(package["price"]),
+            "daily_minutes": int(package["daily_minutes"])
+        })
+
+    result = await db.memberships.update_one(
+        {"id": member_id},
+        {"$set": values}
+    )
+
+    if not result.matched_count:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    member = await db.memberships.find_one(
+        {"id": member_id},
+        {"_id": 0}
+    )
+
+    return {
+        **member,
+        **(await _membership_status(member))
+    }
+
+@api.delete("/membership-admin/members/{member_id}")
+async def delete_managed_member(
+    member_id: str,
+    user=Depends(require_permission("manage_sessions"))
+):
+    result = await db.memberships.update_one(
+        {"id": member_id, "status": {"$ne": "inactive"}},
+        {
+            "$set": {
+                "status": "inactive",
+                "deactivated_at": iso(now_utc()),
+                "deactivated_by": user["id"]
+            }
+        }
+    )
+
+    if not result.matched_count:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    return {"message": "Member deactivated successfully"}
+
+
+@api.get("/membership-admin/game-records")
+async def membership_game_records(
+    user=Depends(require_permission("manage_sessions")),
+    limit: int = Query(500, ge=1, le=2000)
+):
+    # Fetch actual membership gameplay sessions
+    sessions = await db.sessions.find(
+        {"billing_type": "membership"},
+        {"_id": 0}
+    ).sort(
+        "start_time", -1
+    ).limit(limit).to_list(limit)
+
+    if not sessions:
+        return []
+
+    # Fetch all linked membership records in one query
+    membership_ids = list({
+        s.get("membership_id")
+        for s in sessions
+        if s.get("membership_id")
+    })
+
+    members = await db.memberships.find(
+        {"id": {"$in": membership_ids}},
+        {"_id": 0}
+    ).to_list(len(membership_ids))
+
+    member_map = {
+        m["id"]: m
+        for m in members
+    }
+
+    output = []
+
+    for session in sessions:
+        membership = member_map.get(
+            session.get("membership_id"), {}
+        )
+
+        output.append({
+            "id": session.get("id"),
+            "membership_id": session.get("membership_id"),
+
+            "member_name": membership.get(
+                "member_name",
+                session.get("customer_name", "Member")
+            ),
+
+            "member_id": membership.get("member_id", ""),
+
+            "plan": session.get(
+                "membership_plan",
+                membership.get("plan", "")
+            ),
+
+            "table_number": session.get("table_number", ""),
+
+            "start_time": session.get("start_time"),
+            "end_time": session.get("end_time"),
+
+            "status": session.get("status", "unknown"),
+
+            "duration_minutes": session.get(
+                "duration_minutes", 0
+            ),
+
+            "membership_exhausted": session.get(
+                "membership_exhausted", False
+            ),
+
+            "frames": session.get("frames", [])
+        })
+
+    return output
+
 @api.get("/sessions/active")
 async def active_sessions(user=Depends(get_current_user)):
     rows = await db.sessions.find(
@@ -1276,7 +1891,11 @@ async def active_sessions(user=Depends(get_current_user)):
             "discount": 1,
             "tax_percent": 1,
             "tax_amount": 1,
-            "grand_total": 1
+            "grand_total": 1,
+            "billing_type": 1,
+            "membership_id": 1,
+            "membership_usage_cursor": 1,
+            "membership_exhausted": 1
         }
     ).to_list(1000)
 
@@ -1300,6 +1919,12 @@ async def active_sessions(user=Depends(get_current_user)):
     }
     
     for r in rows:
+        if r.get("billing_type") == "membership" and not r.get("is_paused"):
+            r = await _settle_membership_usage(r, now_utc())
+        if r.get("billing_type") == "membership":
+            membership = await db.memberships.find_one({"id": r.get("membership_id")}, {"_id": 0})
+            if membership:
+                r["membership_state"] = await _membership_status(membership)
         r["table"] = table_map.get(r.get("table_id"))
         r["snacks_total"] = sum(
             float(item.get("subtotal", 0))
@@ -1340,7 +1965,7 @@ async def active_sessions(user=Depends(get_current_user)):
 
             table_amount += (elapsed_seconds / 3600) * rate
 
-        r["table_amount"] = round(table_amount, 2)
+        r["table_amount"] = 0.0 if r.get("billing_type") == "membership" else round(table_amount, 2)
 
     return rows
 
@@ -1440,12 +2065,30 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         raise HTTPException(status_code=404, detail="Table not found")
     if table["status"] != "available":
         raise HTTPException(status_code=400, detail=f"Table is {table['status']}")
+    membership = None
+    if body.billing_type == "membership":
+        if not body.membership_id:
+            raise HTTPException(status_code=400, detail="Select a membership")
+        membership = await db.memberships.find_one({"id": body.membership_id, "status": "active"}, {"_id": 0})
+        if not membership:
+            raise HTTPException(status_code=404, detail="Active membership not found")
+        membership_state = await _membership_status(membership)
+        if membership_state["is_expired"]:
+            raise HTTPException(status_code=400, detail="Membership has expired")
+        if membership_state["remaining_seconds_today"] <= 0:
+            raise HTTPException(status_code=400, detail="Today's membership allowance is exhausted")
+        if await db.sessions.find_one({"membership_id": body.membership_id, "status": "active"}):
+            raise HTTPException(status_code=409, detail="This member already has an active session")
     session = {
         "id": str(uuid.uuid4()),
         "table_id": table["id"],
         "table_number": table["table_number"],
         "customer_name": body.customer_name or "",
         "notes": body.notes or "",
+        "billing_type": body.billing_type,
+        "membership_id": body.membership_id if body.billing_type == "membership" else None,
+        "membership_plan": membership.get("plan") if membership else None,
+        "membership_usage_cursor": iso(now_utc()) if membership else None,
         "start_time": iso(now_utc()),
         "end_time": None,
         # Pause information
@@ -1643,6 +2286,11 @@ async def pause_session(
             detail="Invalid pause reason"
     )
 
+    if s.get("billing_type") == "membership":
+        s = await _settle_membership_usage(s, now_utc())
+        if s.get("membership_exhausted"):
+            raise HTTPException(status_code=409, detail="Membership daily allowance exhausted")
+
     await db.sessions.update_one(
         {"id": session_id},
         {
@@ -1679,6 +2327,16 @@ async def resume_session(
 
     if not s.get("is_paused"):
         raise HTTPException(status_code=400, detail="Session is not paused")
+    if s.get("membership_exhausted"):
+        raise HTTPException(status_code=409, detail="Membership allowance is exhausted. End this session or continue with normal billing.")
+    if s.get("billing_type") == "membership":
+        membership = await db.memberships.find_one({"id": s.get("membership_id")}, {"_id": 0})
+        if not membership:
+            raise HTTPException(status_code=409, detail="Membership record not found")
+            
+        state = await _membership_status(membership)
+        if state["is_expired"] or state["remaining_seconds_today"] <= 0:
+            raise HTTPException(status_code=409, detail="Membership has no remaining time today")
 
     pause_started_at = datetime.fromisoformat(s["pause_started_at"])
     paused_seconds = s.get("paused_seconds", 0)
@@ -1704,6 +2362,7 @@ async def resume_session(
                 "paused_seconds": paused_seconds,
                 "pause_reason": None,
                 "current_frame": current_frame,
+                **({"membership_usage_cursor": iso(now_utc())} if s.get("billing_type") == "membership" else {}),
             }
         },
     )
@@ -1812,7 +2471,7 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
     "current_frame_amount": cf["amount"] if cf else None,
     "table_amount_raw": table_amount_raw,
 })
-    table_amount = round(table_amount_raw, 2)
+    table_amount = 0.0 if s.get("billing_type") == "membership" else round(table_amount_raw, 2)
     # Calculate snack amount directly from the actual session items
     snacks_amount = round(
         sum(
@@ -1846,6 +2505,8 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
+    if s.get("billing_type") == "membership" and not s.get("is_paused"):
+        s = await _settle_membership_usage(s, now_utc())
     # Determine authoritative end timestamp
     start_dt = datetime.fromisoformat(s["start_time"])
     now = now_utc()
@@ -1922,7 +2583,9 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         frames.append(frame)
 
     # Table amount: sum of frame amounts if any, else full duration × rate
-    if frames:
+    if s.get("billing_type") == "membership":
+        table_amount = 0.0
+    elif frames:
         table_amount = round(sum(float(f.get("amount", 0)) for f in frames), 2)
     else:
         table_amount = round((duration_seconds / 3600.0) * rate, 2)
@@ -2019,6 +2682,62 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
     await _session_with_details(s)
     return s
 
+@api.post("/sessions/{session_id}/continue-normal")
+async def continue_membership_as_normal(session_id: str, user=Depends(require_permission("manage_sessions"))):
+    """Close an exhausted membership session and start normal billing on the same table.
+    Existing snacks move to the new session so they are billed once.
+    """
+    old = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not old or old.get("status") != "active" or old.get("billing_type") != "membership":
+        raise HTTPException(status_code=400, detail="Active membership session not found")
+    if not old.get("membership_exhausted"):
+        raise HTTPException(status_code=409, detail="Membership allowance has not been exhausted")
+    table = await db.tables.find_one({"id": old["table_id"]}, {"_id": 0})
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+    now = now_utc()
+    exhausted_at = datetime.fromisoformat(old.get("pause_started_at") or iso(now))
+    old_frames = list(old.get("frames") or [])
+    current = old.get("current_frame")
+    if current:
+        closed = dict(current)
+        closed["end_time"] = iso(exhausted_at)
+        closed["auto_closed"] = True
+        old_frames.append(closed)
+    await db.sessions.update_one({"id": session_id}, {"$set": {
+        "status": "completed", "end_time": iso(exhausted_at), "ended_at": iso(exhausted_at),
+        "current_frame": None, "frames": old_frames, "table_amount": 0.0,
+        "grand_total": 0, "grand_total_exact": 0.0, "discount": 0.0,
+        "tax_amount": 0.0, "payment_method": "membership", "membership_converted": True,
+        "ended_by": user["id"], "ended_by_name": user.get("name", ""),
+    }})
+    new_frame = None
+    if current:
+        new_frame = {
+            "id": str(uuid.uuid4()), "frame_number": 1,
+            "player_a": current.get("player_a", ""), "player_b": current.get("player_b", ""),
+            "start_time": iso(now), "end_time": None, "winner": None, "loser": None,
+            "paid_by": None, "notes": current.get("notes", ""),
+            "duration_minutes": 0, "paused_seconds": 0,
+        }
+    new_session = {
+        "id": str(uuid.uuid4()), "table_id": table["id"], "table_number": table["table_number"],
+        "customer_name": old.get("customer_name", ""), "notes": old.get("notes", ""),
+        "billing_type": "normal", "membership_id": None, "start_time": iso(now), "end_time": None,
+        "is_paused": False, "pause_started_at": None, "paused_seconds": 0, "pause_reason": None,
+        "duration_minutes": 0, "rate_used": float(table["hourly_rate"]), "table_amount": 0.0,
+        "snacks": old.get("snacks", []), "snacks_amount": float(old.get("snacks_amount", 0)),
+        "discount": 0.0, "tax_percent": 0.0, "tax_amount": 0.0, "grand_total": 0.0,
+        "status": "active", "started_by": user["id"], "started_by_name": user.get("name", ""),
+        "frames": [], "current_frame": new_frame, "payment_method": None, "payment_notes": "",
+        "continued_from_membership_session_id": session_id,
+    }
+    await db.sessions.insert_one(new_session.copy())
+    await db.sessions.update_one({"id": session_id}, {"$set": {"snacks": [], "snacks_amount": 0.0}})
+    new_session["table"] = table
+    return new_session
+
+
 # ---- Frames ----
 @api.post("/sessions/{session_id}/frames/start")
 async def start_frame(session_id: str, body: FrameStart, user=Depends(require_permission("manage_sessions"))):
@@ -2083,6 +2802,11 @@ async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permis
 
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
+
+    if s.get("billing_type") == "membership" and not s.get("is_paused"):
+        s = await _settle_membership_usage(s, now_utc())
+        if s.get("membership_exhausted"):
+            raise HTTPException(status_code=409, detail="Membership daily allowance exhausted")
 
     frame = s.get("current_frame")
 
@@ -2181,8 +2905,8 @@ async def timed_dashboard_query(name, operation):
 # ---- Dashboard ----
 @api.get("/dashboard/stats")
 async def dashboard_stats(user=Depends(get_current_user)):
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    tables, active, completed_today, food_orders_today = await asyncio.gather(
+    today_start, today_end = local_day_range()
+    tables, active, completed_today, food_orders_today, membership_payments_today = await asyncio.gather(
         timed_dashboard_query(
             "tables",
             db.tables.find(
@@ -2199,7 +2923,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
             db.sessions.find(
                 {
                     "status": "completed",
-                    "ended_at": {"$gte": iso(today_start)}
+                    "ended_at": {"$gte": iso(today_start),"$lt": iso(today_end)}
                 },
                 {
                     "_id": 0,
@@ -2213,13 +2937,23 @@ async def dashboard_stats(user=Depends(get_current_user)):
             db.food_orders.find(
                 {
                     "status": "completed",
-                    "paid_at": {"$gte": iso(today_start)}
+                    "paid_at": {"$gte": iso(today_start),"$lt": iso(today_end)}
                 },
                 {
                     "_id": 0,
                     "final_total": 1,
                     "total": 1
                 }
+            ).to_list(1000),
+        ),
+        timed_dashboard_query(
+            "membership_payments_today",
+            db.payments.find(
+                {
+                    "source_type": "membership",
+                    "created_at": {"$gte": iso(today_start), "$lt": iso(today_end)}
+                },
+                {"_id": 0, "amount": 1}
             ).to_list(1000),
         ),
     )
@@ -2253,10 +2987,15 @@ async def dashboard_stats(user=Depends(get_current_user)):
         2
     )
 
+    membership_revenue_today = round(
+        sum(float(p.get("amount", 0)) for p in membership_payments_today),
+        2
+    )
+
     today_revenue = round(
-    table_revenue_today + food_only_snacks_revenue,
-    2
-)
+        table_revenue_today + food_only_snacks_revenue + membership_revenue_today,
+        2
+    )
 
     today_snacks_revenue = round(
         sum(
@@ -2268,6 +3007,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
     today_sessions = len(completed_today) + active
     return {
         "today_revenue": today_revenue,
+        "membership_revenue": membership_revenue_today,
         "active_sessions": active,
         "available_tables": available,
         "occupied_tables": occupied,
@@ -2306,6 +3046,20 @@ async def dashboard_charts(user=Depends(get_current_user)):
         ).to_list(2000),
     )
 
+    membership_payments = await timed_dashboard_query(
+        "charts_membership_revenue",
+        db.payments.find(
+            {
+                "source_type": "membership",
+                "created_at": {
+                    "$gte": iso(daily_start),
+                    "$lt": iso(daily_end)
+                }
+            },
+            {"_id": 0, "created_at": 1, "amount": 1}
+        ).to_list(2000),
+    )
+
     daily_map = {}
 
     for r in recent_sessions:
@@ -2331,6 +3085,17 @@ async def dashboard_charts(user=Depends(get_current_user)):
 
         daily_map[day_key]["sessions"] += 1
 
+    for payment in membership_payments:
+        created_at = payment.get("created_at")
+        if not created_at:
+            continue
+        try:
+            day_key = datetime.fromisoformat(created_at).date()
+        except Exception:
+            continue
+        if day_key not in daily_map:
+            daily_map[day_key] = {"revenue": 0.0, "sessions": 0}
+        daily_map[day_key]["revenue"] += float(payment.get("amount", 0))
 
     daily = []
 
@@ -2399,30 +3164,24 @@ async def dashboard_recent(user=Depends(get_current_user)):
 
 # ---- Reports ----
 @api.get("/reports")
-async def reports(period: str = Query("daily"), start: Optional[str] = None, end: Optional[str] = None, user=Depends(require_permission("view_reports"))):
-    now = datetime.now(timezone.utc)
-    if start and end:
-        d_start = datetime.fromisoformat(start)
-        d_end = datetime.fromisoformat(end)
-    elif period == "weekly":
-        d_start = now - timedelta(days=7)
-        d_end = now
-    elif period == "monthly":
-        d_start = now - timedelta(days=30)
-        d_end = now
-    else:
-        d_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        d_end = now
+async def reports(
+    period: str = Query("daily"),
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    user=Depends(require_permission("view_reports"))
+):
+    d_start, d_end = _period_range(period, start, end)
+
     sessions = await db.sessions.find(
-    {
-        "status": "completed",
-        "ended_at": {
-            "$gte": iso(d_start),
-            "$lte": iso(d_end)
-        }
-    },
-    {"_id": 0}
-        ).to_list(5000)
+        {
+            "status": "completed",
+            "ended_at": {
+                "$gte": iso(d_start),
+                "$lt": iso(d_end)
+            }
+        },
+        {"_id": 0}
+    ).to_list(5000)
 
     # Food-only sales
     food_orders = await db.food_orders.find(
@@ -2430,11 +3189,27 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
             "status": "completed",
             "paid_at": {
                 "$gte": iso(d_start),
-                "$lte": iso(d_end)
+                "$lt": iso(d_end)
             }
         },
         {"_id": 0}
     ).to_list(5000)
+
+    # Membership purchases are recorded in db.payments.
+    membership_payments = await db.payments.find(
+        {
+            "source_type": "membership",
+            "created_at": {
+                "$gte": iso(d_start),
+                "$lt": iso(d_end)
+            }
+        },
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(5000)
+    membership_revenue = round(
+        sum(float(p.get("amount", 0)) for p in membership_payments),
+        2
+    )
 
     total_sessions = len(sessions)
 
@@ -2465,7 +3240,8 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
     # Total revenue
     total_revenue = round(
         sum(float(s.get("grand_total", 0)) for s in sessions)
-        + food_only_revenue,
+        + food_only_revenue
+        + membership_revenue,
         2
     )
 
@@ -2622,6 +3398,7 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
         for name in (
             [s.get("customer_name", "") for s in sessions]
             + [o.get("customer_name", "") for o in food_orders]
+            + [p.get("customer_name", "") for p in membership_payments]
         )
         if name and name.strip()
     })
@@ -2637,6 +3414,8 @@ async def reports(period: str = Query("daily"), start: Optional[str] = None, end
         "snack_revenue": snack_revenue,
         "food_only_revenue": food_only_revenue,
         "food_only_orders": len(food_orders),
+        "membership_revenue": membership_revenue,
+        "membership_payments": membership_payments,
         "avg_duration_min": avg_duration,
         "best_tables": best_tables,
         "best_snacks": best_snacks,
@@ -3044,11 +3823,20 @@ async def archive_expense_subcategory(
 def _parse_date(d: Optional[str]) -> datetime:
     if not d:
         return now_utc()
-    try:
-        return datetime.fromisoformat(d.replace("Z", "+00:00"))
-    except Exception:
-        return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
+    try:
+        parsed = datetime.fromisoformat(d.replace("Z", "+00:00"))
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=CLUB_TIMEZONE)
+
+        return parsed.astimezone(timezone.utc)
+
+    except Exception:
+        parsed = datetime.strptime(d, "%Y-%m-%d")
+        parsed = parsed.replace(tzinfo=CLUB_TIMEZONE)
+        return parsed.astimezone(timezone.utc)
+    
 @api.get("/expenses")
 async def list_expenses(
     start: Optional[str] = None, end: Optional[str] = None,
@@ -3059,8 +3847,17 @@ async def list_expenses(
     q = {}
     if start or end:
         q["date"] = {}
-        if start: q["date"]["$gte"] = iso(_parse_date(start))
-        if end: q["date"]["$lte"] = iso(_parse_date(end))
+        if start:
+            q["date"]["$gte"] = iso(_parse_date(start))
+
+        if end:
+            end_date = date.fromisoformat(end) + timedelta(days=1)
+            end_local = datetime.combine(
+                end_date,
+                datetime.min.time(),
+                tzinfo=CLUB_TIMEZONE
+            )
+            q["date"]["$lt"] = iso(end_local.astimezone(timezone.utc))
     if category: q["category"] = category
     if vendor_id: q["vendor_id"] = vendor_id
     if payment_method: q["payment_method"] = payment_method
@@ -3212,25 +4009,72 @@ async def run_due_recurring(user=Depends(require_permission("manage_expenses")))
 
 # ---- Financial Report endpoints ----
 def _period_range(period: str, start: Optional[str] = None, end: Optional[str] = None):
-    now = datetime.now(timezone.utc)
-    if start and end:
-        return _parse_date(start), _parse_date(end)
+    def parse_start(value: str) -> datetime:
+        if len(value) == 10:
+            local_dt = datetime.combine(
+                date.fromisoformat(value),
+                datetime.min.time(),
+                tzinfo=CLUB_TIMEZONE
+            )
+            return local_dt.astimezone(timezone.utc)
+
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=CLUB_TIMEZONE)
+
+        return dt.astimezone(timezone.utc)
+
+    def parse_end(value: str) -> datetime:
+        if len(value) == 10:
+            next_day = date.fromisoformat(value) + timedelta(days=1)
+
+            local_dt = datetime.combine(
+                next_day,
+                datetime.min.time(),
+                tzinfo=CLUB_TIMEZONE
+            )
+            return local_dt.astimezone(timezone.utc)
+
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=CLUB_TIMEZONE)
+
+        return dt.astimezone(timezone.utc)
+
+    if start or end:
+        d_start = parse_start(start) if start else datetime.min.replace(tzinfo=timezone.utc)
+        d_end = parse_end(end) if end else now_utc()
+
+        if d_start >= d_end:
+            raise HTTPException(
+                status_code=400,
+                detail="End date must be after start date"
+            )
+
+        return d_start, d_end
+
     if period == "yesterday":
-        s = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        return s, s + timedelta(days=1)
+        yesterday = local_now().date() - timedelta(days=1)
+        return local_day_range(yesterday)
+
     if period == "weekly":
+        now = now_utc()
         return now - timedelta(days=7), now
+
     if period == "monthly":
+        now = now_utc()
         return now - timedelta(days=30), now
-    # today
-    return now.replace(hour=0, minute=0, second=0, microsecond=0), now
+
+    return local_day_range()
 
 @api.get("/reports/pnl")
 async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, end: Optional[str] = None, user=Depends(require_permission("view_profit"))):
     d_start, d_end = _period_range(period, start, end)
     # Revenue = completed sessions in range
     sessions = await db.sessions.find(
-        {"status": "completed", "ended_at": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+        {"status": "completed", "ended_at": {"$gte": iso(d_start), "$lt": iso(d_end)}}, {"_id": 0}
     ).to_list(10000)
     table_revenue = round(sum(s.get("table_amount", 0) for s in sessions), 2)
     snack_revenue = round(sum(s.get("snacks_amount", 0) for s in sessions), 2)
@@ -3239,7 +4083,7 @@ async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, 
             "status": "completed",
             "paid_at": {
                 "$gte": iso(d_start),
-                "$lte": iso(d_end)
+                "$lt": iso(d_end)
             }
         },
         {"_id": 0}
@@ -3263,13 +4107,28 @@ async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, 
         2
     )
 
+    membership_payments = await db.payments.find(
+        {
+            "source_type": "membership",
+            "created_at": {
+                "$gte": iso(d_start),
+                "$lt": iso(d_end)
+            }
+        },
+        {"_id": 0}
+    ).to_list(10000)
+    membership_revenue = round(
+        sum(float(p.get("amount", 0)) for p in membership_payments),
+        2
+    )
+
     gross_revenue = round(
-        table_revenue + food_only_revenue,
+        table_revenue + food_only_revenue + membership_revenue,
         2
     )
     # Expenses in range
     exps = await db.expenses.find(
-        {"date": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
+        {"date": {"$gte": iso(d_start), "$lt": iso(d_end)}}, {"_id": 0}
     ).to_list(10000)
     total_expenses = round(sum(e.get("amount", 0) for e in exps), 2)
     net_profit = round(gross_revenue - total_expenses, 2)
@@ -3283,38 +4142,82 @@ async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, 
         [{"category": k, "amount": round(v, 2)} for k, v in by_cat.items()],
         key=lambda x: -x["amount"],
     )
-    # Monthly trend (last 6 months)
+    # Monthly trend (last 6 months) — use club-local month boundaries
     trend = []
+
+    current_local = local_now()
+    current_month_index = current_local.year * 12 + current_local.month - 1
+
     for i in range(5, -1, -1):
-        m_end = (now_utc().replace(day=1) - timedelta(days=1)) if i > 0 else now_utc()
-        # simpler: compute back N months from now
-        pass
-    # Use 6 buckets going back
-    trend = []
-    cursor = now_utc().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    for i in range(5, -1, -1):
-        # month starting `i` months ago
-        year = cursor.year
-        month = cursor.month - i
-        while month <= 0:
-            month += 12; year -= 1
-        m_start = cursor.replace(year=year, month=month)
-        next_month = m_start.replace(day=28) + timedelta(days=4)
-        m_end = next_month - timedelta(days=next_month.day)
-        m_end = m_end.replace(hour=23, minute=59, second=59)
+        month_index = current_month_index - i
+
+        year = month_index // 12
+        month = (month_index % 12) + 1
+
+        month_start_local = datetime(
+            year, month, 1, 0, 0, 0,
+            tzinfo=CLUB_TIMEZONE
+        )
+
+        next_month_index = month_index + 1
+        next_year = next_month_index // 12
+        next_month = (next_month_index % 12) + 1
+
+        month_end_local = datetime(
+            next_year, next_month, 1, 0, 0, 0,
+            tzinfo=CLUB_TIMEZONE
+        )
+
+        # Current month should only include data up to now
+        if i == 0:
+            month_end_local = current_local
+
+        month_start_utc = month_start_local.astimezone(timezone.utc)
+        month_end_utc = month_end_local.astimezone(timezone.utc)
+
         rev = await db.sessions.find(
-            {"status": "completed", "ended_at": {"$gte": iso(m_start), "$lte": iso(m_end)}}, {"_id": 0}
+            {
+                "status": "completed",
+                "ended_at": {
+                    "$gte": iso(month_start_utc),
+                    "$lt": iso(month_end_utc)
+                }
+            },
+            {"_id": 0}
         ).to_list(5000)
+
         exp_rows = await db.expenses.find(
-            {"date": {"$gte": iso(m_start), "$lte": iso(m_end)}}, {"_id": 0}
+            {
+                "date": {
+                    "$gte": iso(month_start_utc),
+                    "$lt": iso(month_end_utc)
+                }
+            },
+            {"_id": 0}
         ).to_list(5000)
-        r = sum(x.get("grand_total", 0) for x in rev)
-        ex = sum(x.get("amount", 0) for x in exp_rows)
+
+        membership_month_payments = await db.payments.find(
+            {
+                "source_type": "membership",
+                "created_at": {
+                    "$gte": iso(month_start_utc),
+                    "$lt": iso(month_end_utc)
+                }
+            },
+            {"_id": 0, "amount": 1}
+        ).to_list(5000)
+
+        revenue = (
+            sum(float(x.get("grand_total", 0)) for x in rev)
+            + sum(float(x.get("amount", 0)) for x in membership_month_payments)
+        )
+        expenses = sum(float(x.get("amount", 0)) for x in exp_rows)
+
         trend.append({
-            "month": m_start.strftime("%b"),
-            "revenue": round(r, 2),
-            "expenses": round(ex, 2),
-            "profit": round(r - ex, 2),
+            "month": month_start_local.strftime("%b"),
+            "revenue": round(revenue, 2),
+            "expenses": round(expenses, 2),
+            "profit": round(revenue - expenses, 2),
         })
     return {
         "period": period,
@@ -3323,6 +4226,7 @@ async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, 
         "food_only_revenue": food_only_revenue,
         "food_only_orders": len(food_orders),
         "snack_revenue": snack_revenue,
+        "membership_revenue": membership_revenue,
         "other_income": 0.0,
         "gross_revenue": gross_revenue,
         "total_expenses": total_expenses,
@@ -3332,6 +4236,7 @@ async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, 
         "revenue_sources": [
             {"name": "Table", "value": table_revenue},
             {"name": "Snacks", "value": snack_revenue},
+            {"name": "Memberships", "value": membership_revenue},
         ],
         "monthly_trend": trend,
     }
@@ -3340,8 +4245,15 @@ async def profit_and_loss(period: str = "monthly", start: Optional[str] = None, 
 async def report_expenses(period: str = "monthly", start: Optional[str] = None, end: Optional[str] = None, user=Depends(require_permission("view_expenses"))):
     d_start, d_end = _period_range(period, start, end)
     exps = await db.expenses.find(
-        {"date": {"$gte": iso(d_start), "$lte": iso(d_end)}}, {"_id": 0}
-    ).sort("date", -1).to_list(10000)
+    {
+        "date": {
+            "$gte": iso(d_start),
+            "$lt": iso(d_end)
+        }
+    },
+    {"_id": 0}
+).sort("date", -1).to_list(10000)
+
     total = round(sum(e.get("amount", 0) for e in exps), 2)
     # by category
     by_cat = {}
@@ -3355,17 +4267,55 @@ async def report_expenses(period: str = "monthly", start: Optional[str] = None, 
         v = e.get("vendor_name") or "Unassigned"
         by_v[v] = by_v.get(v, 0) + float(e.get("amount", 0))
     vendor_spending = sorted([{"vendor": k, "amount": round(v, 2)} for k, v in by_v.items()], key=lambda x: -x["amount"])[:10]
-    # Monthly trend (6 months)
+    # Monthly trend (6 months) — club-local month boundaries
     trend = []
-    cursor = now_utc().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    current_local = local_now()
+    current_month_index = current_local.year * 12 + current_local.month - 1
+
     for i in range(5, -1, -1):
-        year = cursor.year; month = cursor.month - i
-        while month <= 0: month += 12; year -= 1
-        m_start = cursor.replace(year=year, month=month)
-        next_month = m_start.replace(day=28) + timedelta(days=4)
-        m_end = (next_month - timedelta(days=next_month.day)).replace(hour=23, minute=59, second=59)
-        exs = await db.expenses.find({"date": {"$gte": iso(m_start), "$lte": iso(m_end)}}, {"_id": 0}).to_list(5000)
-        trend.append({"month": m_start.strftime("%b"), "amount": round(sum(x.get("amount", 0) for x in exs), 2)})
+        month_index = current_month_index - i
+
+        year = month_index // 12
+        month = (month_index % 12) + 1
+
+        month_start_local = datetime(
+            year, month, 1,
+            tzinfo=CLUB_TIMEZONE
+        )
+
+        next_month_index = month_index + 1
+        next_year = next_month_index // 12
+        next_month = (next_month_index % 12) + 1
+
+        month_end_local = datetime(
+            next_year, next_month, 1,
+            tzinfo=CLUB_TIMEZONE
+        )
+
+        if i == 0:
+            month_end_local = current_local
+
+        month_start_utc = month_start_local.astimezone(timezone.utc)
+        month_end_utc = month_end_local.astimezone(timezone.utc)
+
+        exs = await db.expenses.find(
+            {
+                "date": {
+                    "$gte": iso(month_start_utc),
+                    "$lt": iso(month_end_utc)
+                }
+            },
+            {"_id": 0}
+        ).to_list(5000)
+
+        trend.append({
+            "month": month_start_local.strftime("%b"),
+            "amount": round(
+                sum(float(x.get("amount", 0)) for x in exs),
+                2
+            )
+        })
     # Largest
     largest = sorted(exps, key=lambda x: -float(x.get("amount", 0)))[:10]
     # Recurring
@@ -3395,7 +4345,7 @@ async def report_payments(
         {
             "created_at": {
                 "$gte": iso(d_start),
-                "$lte": iso(d_end)
+                "$lt": iso(d_end)
             }
         },
         {"_id": 0}
@@ -3407,7 +4357,7 @@ async def report_payments(
             "status": "completed",
             "paid_at": {
                 "$gte": iso(d_start),
-                "$lte": iso(d_end)
+                "$lt": iso(d_end)
             }
         },
         {"_id": 0}
@@ -3554,6 +4504,13 @@ async def seed():
 
     await db.payments.create_index("created_at")
     await db.payments.create_index("session_id")
+    # One initial purchase payment per membership. Existing session payments
+    # are unaffected because they do not have source_type="membership".
+    await db.payments.create_index(
+        [("source_type", 1), ("source_id", 1)],
+        unique=True,
+        partialFilterExpression={"source_type": "membership"}
+    )
 
     await db.vendors.create_index("name")
 
@@ -3566,6 +4523,11 @@ async def seed():
     )
     await db.sessions.create_index("start_time")
     await db.sessions.create_index("table_id")
+    await db.sessions.create_index("membership_id")
+    await db.memberships.create_index("id", unique=True)
+    await db.memberships.create_index("status")
+    await _ensure_membership_packages()
+    await db.membership_packages.create_index("id", unique=True)
 
     # Food orders
     await db.food_orders.create_index(
@@ -3586,23 +4548,6 @@ async def seed():
             t["created_at"] = iso(now_utc())
         await db.tables.insert_many(defaults)
         logger.info("Seeded default tables")
-
-    if await db.snacks.count_documents({}) == 0:
-        snacks = [
-            {"name": "Coke", "category": "Cold Drink", "price": 40, "stock_quantity": 50},
-            {"name": "Coffee", "category": "Hot Drink", "price": 50, "stock_quantity": 100},
-            {"name": "Chips", "category": "Snack", "price": 20, "stock_quantity": 80},
-            {"name": "Burger", "category": "Food", "price": 120, "stock_quantity": 25},
-            {"name": "Sandwich", "category": "Food", "price": 90, "stock_quantity": 30},
-            {"name": "Water", "category": "Cold Drink", "price": 20, "stock_quantity": 100},
-            {"name": "Tea", "category": "Hot Drink", "price": 30, "stock_quantity": 80},
-            {"name": "French Fries", "category": "Snack", "price": 80, "stock_quantity": 40},
-        ]
-        for s in snacks:
-            s["id"] = str(uuid.uuid4())
-            s["created_at"] = iso(now_utc())
-        await db.snacks.insert_many(snacks)
-        logger.info("Seeded default snacks")
 
 @app.on_event("startup")
 async def on_startup():
