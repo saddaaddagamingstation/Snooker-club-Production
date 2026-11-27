@@ -360,6 +360,14 @@ export default function Sessions({ gameType = null } = {}) {
                   {s.game_type === "pool" ? `Pool fixed packages · 30 min ₹${s.pricing_snapshot?.pool?.package_30 ?? 130} / 60 min ₹${s.pricing_snapshot?.pool?.package_60 ?? 250}` : `₹${s.pricing_snapshot?.[s.game_type]?.extra_minute ?? 5}/min after each initial 30-minute block · R.D. ${s.rd_selected ? `₹${s.rd_amount ?? s.pricing_snapshot?.rd_price ?? 20} included once` : "not selected"}`}
                 </div>
               )}
+              {s.game_type === "ps5" && s.ps5_auto_end_at && (
+                <div className="px-6 pt-3 text-sm text-amber-300">
+                  <span className="font-semibold">Reservation cutoff:</span>{" "}
+                  This walk-in will automatically end at{" "}
+                  {new Date(s.ps5_auto_end_at).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}{" "}
+                  (15 minutes before the next confirmed reservation).
+                </div>
+              )}
               {s.billing_type === "membership" && (
                 <div className="px-6 pt-4 text-sm text-gray-300">
                   <span className="text-green-400 font-semibold">Membership play</span>
@@ -468,7 +476,7 @@ export default function Sessions({ gameType = null } = {}) {
               </div>
               {can("manage_sessions") && timerPromptTarget?.id === s.id && (
                 <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/45 backdrop-blur-md p-4 sm:p-6">
-                  <div className="w-full max-w-md rounded-2xl border border-amber-500/50 bg-[#111111]/95 p-5 sm:p-6 space-y-4 shadow-[0_18px_60px_rgba(0,0,0,0.75)]">
+                  <div className="w-full max-w-md scale-[0.88] origin-center rounded-2xl border border-amber-500/50 bg-[#111111]/95 p-5 sm:p-6 space-y-4 shadow-[0_18px_60px_rgba(0,0,0,0.75)]">
                     <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-amber-400 font-bold">
                       <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
                       Game time completed

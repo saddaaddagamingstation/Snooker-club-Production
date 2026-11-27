@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 
 import { useState, useEffect, useRef } from "react";
-import api from "@/lib/api";
+import api, { getStoredToken } from "@/lib/api";
 import { toast } from "sonner";
 import PageSkeleton from "@/components/states/PageSkeleton";
 import { Suspense } from "react";
@@ -94,60 +94,120 @@ export default function AppLayout() {
     }
   };
 
-  // Background listener only; no alert button is rendered in the global header.
+  // Realtime listener: timer warnings and session-ended alerts are pushed by
+  // the backend to every authorized device. No periodic HTTP polling is used.
   useEffect(() => {
     if (!user?.id || !can("manage_sessions")) return undefined;
+
     let alive = true;
-    let running = false;
-    const deliver = async () => {
-      if (!alive || running) return;
-      if (localStorage.getItem("cueops_timer_alerts_enabled") === "false") return;
-      running = true;
-      try {
-        const { data } = await api.get("/timer-alerts/pending");
-        for (const candidate of data || []) {
-          if (!alive || localStorage.getItem("cueops_timer_alerts_enabled") === "false") break;
-          const claim = await api.post(`/timer-alerts/${candidate.id}/claim`);
-          if (!claim.data?.claimed || !claim.data?.alert) continue;
-          if (!alive || localStorage.getItem("cueops_timer_alerts_enabled") === "false") break;
-          const alert = claim.data.alert;
-          const title = `Timer Alert – ${alert.remaining_display} remaining`;
-          const body = [
-            `Game: ${alert.game_type}`,
-            `Table: ${alert.table_number}`,
-            `Frame: ${alert.frame_number}`,
-            `Remaining: ${alert.remaining_display}`,
-            "",
-            "Please inform the customer.",
-          ].join("\n");
-          toast.warning(title, { description: body, duration: 15000 });
-          if (
-            localStorage.getItem("cueops_timer_alert_desktop") === "true" &&
-            "Notification" in window && Notification.permission === "granted"
-          ) {
-            try {
-              const notification = new Notification(title, {
-                body,
-                tag: `cueops-timer-${alert.timer_block_id}`,
-                renotify: false,
-                requireInteraction: true,
-              });
-              notification.onclick = () => { window.focus(); notification.close(); };
-            } catch (error) {
-              console.warn("Desktop timer notification could not be shown", error);
-            }
-          }
-          playTimerAlertSound();
+    let socket = null;
+    let reconnectTimer = null;
+    let reconnectDelay = 1000;
+
+    const showDesktopNotification = (title, body, tag) => {
+      if (
+        localStorage.getItem("cueops_timer_alert_desktop") === "true" &&
+        "Notification" in window && Notification.permission === "granted"
+      ) {
+        try {
+          const notification = new Notification(title, {
+            body,
+            tag,
+            renotify: false,
+            requireInteraction: true,
+          });
+          notification.onclick = () => { window.focus(); notification.close(); };
+        } catch (error) {
+          console.warn("Desktop alert could not be shown", error);
         }
-      } catch (error) {
-        // Keep the app shell running if alert polling temporarily fails.
-      } finally {
-        running = false;
       }
     };
-    deliver();
-    const interval = window.setInterval(deliver, 3000);
-    return () => { alive = false; window.clearInterval(interval); };
+
+    const handleAlert = (message) => {
+      const alert = message?.alert;
+      if (!alert) return;
+
+      if (message.type === "timer_warning") {
+        if (localStorage.getItem("cueops_timer_alerts_enabled") === "false") return;
+        const stableId = alert.timer_block_id || alert.id;
+        const seenKey = `cueops_seen_timer_alert_${stableId}`;
+        if (stableId && localStorage.getItem(seenKey) === "true") return;
+        if (stableId) localStorage.setItem(seenKey, "true");
+
+        const title = `Timer Alert – ${alert.remaining_display} remaining`;
+        const body = [
+          `Game: ${alert.game_type}`,
+          `Table: ${alert.table_number}`,
+          `Frame: ${alert.frame_number || "—"}`,
+          `Remaining: ${alert.remaining_display}`,
+          "",
+          "Please inform the customer.",
+        ].join("\n");
+        toast.warning(title, { description: body, duration: 15000 });
+        showDesktopNotification(title, body, `cueops-timer-${stableId}`);
+        playTimerAlertSound();
+        return;
+      }
+
+      if (message.type === "session_ended") {
+        const stableId = alert.session_id || alert.id;
+        const seenKey = `cueops_seen_session_end_${stableId}`;
+        if (stableId && localStorage.getItem(seenKey) === "true") return;
+        if (stableId) localStorage.setItem(seenKey, "true");
+
+        const title = `Session Ended – ${alert.game_type || "Session"}`;
+        const body = [
+          `Table: ${alert.table_number}`,
+          `Customer: ${alert.customer_name}`,
+          `Total: ₹${Number(alert.grand_total || 0).toLocaleString("en-IN")}`,
+        ].join("\n");
+        toast.success(title, { description: body, duration: 15000 });
+        showDesktopNotification(title, body, `cueops-session-ended-${stableId}`);
+      }
+    };
+
+    const connect = () => {
+      if (!alive) return;
+      const token = getStoredToken();
+      if (!token) return;
+
+      const backendUrl = process.env.REACT_APP_BACKEND_URL || window.location.origin;
+      const wsUrl = new URL("/api/ws/alerts", backendUrl);
+      wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+
+      socket = new WebSocket(wsUrl.toString());
+      socket.onopen = () => {
+        reconnectDelay = 1000;
+        socket?.send(JSON.stringify({ type: "authenticate", token }));
+      };
+      socket.onmessage = (event) => {
+        try { handleAlert(JSON.parse(event.data)); }
+        catch (error) { console.warn("Invalid realtime alert payload", error); }
+      };
+      socket.onerror = () => socket?.close();
+      socket.onclose = (event) => {
+        if (!alive || event.code === 4401 || event.code === 4403) return;
+        reconnectTimer = window.setTimeout(connect, reconnectDelay);
+        reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+      };
+    };
+
+    const handleOnline = () => {
+      if (socket?.readyState === WebSocket.CLOSED) {
+        if (reconnectTimer) window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        connect();
+      }
+    };
+    window.addEventListener("online", handleOnline);
+    connect();
+
+    return () => {
+      alive = false;
+      window.removeEventListener("online", handleOnline);
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+    };
   }, [user?.id, can]);
 
   useEffect(() => {

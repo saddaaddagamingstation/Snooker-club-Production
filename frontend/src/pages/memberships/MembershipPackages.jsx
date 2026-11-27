@@ -8,6 +8,7 @@ const EMPTY_FORM = {
   price: "",
   total_hours: "",
   daily_minutes: 120,
+  validity_days: 30,
   description: "",
   is_active: true,
 };
@@ -47,6 +48,7 @@ export default function MembershipPackages() {
       price: String(pkg.price ?? ""),
       total_hours: String(pkg.total_hours ?? ""),
       daily_minutes: Number(pkg.daily_minutes ?? 120),
+      validity_days: Number(pkg.validity_days ?? 30),
       description: pkg.description || "",
       is_active: pkg.is_active !== false,
     });
@@ -62,6 +64,7 @@ export default function MembershipPackages() {
       price: Number(form.price),
       total_hours: Number(form.total_hours),
       daily_minutes: Number(form.daily_minutes),
+      validity_days: Number(form.validity_days),
       description: form.description.trim(),
       is_active: Boolean(form.is_active),
     };
@@ -70,6 +73,7 @@ export default function MembershipPackages() {
     if (!Number.isFinite(payload.price) || payload.price < 0) return toast.error("Enter a valid package price");
     if (!Number.isInteger(payload.total_hours) || payload.total_hours <= 0) return toast.error("Total hours must be a positive whole number");
     if (!Number.isInteger(payload.daily_minutes) || payload.daily_minutes <= 0) return toast.error("Daily play limit must be greater than zero");
+    if (!Number.isInteger(payload.validity_days) || payload.validity_days <= 0) return toast.error("Validity must be a positive whole number of days");
 
     setSaving(true);
     try {
@@ -153,7 +157,7 @@ export default function MembershipPackages() {
               <div className="mt-2 text-3xl font-bold">{inr(p.price)}</div>
               <div className="mt-1 text-lg font-semibold">{p.total_hours} hours</div>
               <div className="mt-3 space-y-1 text-sm text-gray-400">
-                <div>30-day validity</div>
+                <div>{Number(p.validity_days ?? 30)}-day validity</div>
                 <div>Maximum {Math.floor(Number(p.daily_minutes ?? 120) / 60)}{Number(p.daily_minutes ?? 120) % 60 ? `h ${Number(p.daily_minutes ?? 120) % 60}m` : " hours"}/day</div>
                 <div>PS5 only</div>
                 {p.description ? <div className="pt-2 text-gray-500">{p.description}</div> : null}
@@ -198,13 +202,27 @@ export default function MembershipPackages() {
                   <input type="number" min="1" step="1" value={form.total_hours} onChange={(e) => updateField("total_hours", e.target.value)} placeholder="10" required className="mt-2 w-full rounded-lg border border-white/10 bg-[#0c0c0c] px-3 py-3 text-white outline-none focus:border-green-500" />
                 </label>
               </div>
-              <label className="block text-sm text-gray-300">Daily play limit (minutes)
-                <input type="number" min="1" step="1" value={form.daily_minutes} onChange={(e) => updateField("daily_minutes", e.target.value)} required className="mt-2 w-full rounded-lg border border-white/10 bg-[#0c0c0c] px-3 py-3 text-white outline-none focus:border-green-500" />
-                <span className="mt-1 block text-xs text-gray-500">Default is 120 minutes (2 hours) per day.</span>
-              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="block text-sm text-gray-300">Daily play limit (minutes)
+                  <input type="number" min="1" step="1" value={form.daily_minutes} onChange={(e) => updateField("daily_minutes", e.target.value)} required className="mt-2 w-full rounded-lg border border-white/10 bg-[#0c0c0c] px-3 py-3 text-white outline-none focus:border-green-500" />
+                  <span className="mt-1 block text-xs text-gray-500">Default: 120 minutes/day.</span>
+                </label>
+                <label className="block text-sm text-gray-300">Validity (days)
+                  <input type="number" min="1" step="1" value={form.validity_days} onChange={(e) => updateField("validity_days", e.target.value)} required className="mt-2 w-full rounded-lg border border-white/10 bg-[#0c0c0c] px-3 py-3 text-white outline-none focus:border-green-500" />
+                  <span className="mt-1 block text-xs text-gray-500">Default: 30 days.</span>
+                </label>
+              </div>
               <label className="block text-sm text-gray-300">Description (optional)
                 <textarea value={form.description} onChange={(e) => updateField("description", e.target.value)} rows={2} maxLength={180} placeholder="Short package details" className="mt-2 w-full resize-none rounded-lg border border-white/10 bg-[#0c0c0c] px-3 py-3 text-white outline-none focus:border-green-500" />
               </label>
+              <div className="rounded-xl border border-green-500/20 bg-green-500/[0.06] px-4 py-3">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-green-400">Package value preview</div>
+                <div className="mt-1 flex items-baseline justify-between gap-3">
+                  <span className="text-sm text-gray-400">Effective price per hour</span>
+                  <span className="text-lg font-bold text-white">{Number(form.total_hours) > 0 && Number.isFinite(Number(form.price)) ? inr(Number(form.price) / Number(form.total_hours)) : "—"}<span className="ml-1 text-xs font-normal text-gray-500">/ hour</span></span>
+                </div>
+                <p className="mt-1 text-xs text-gray-500">{Number(form.total_hours) > 0 ? `${form.total_hours} total hours` : "Enter total hours"} · {Number(form.validity_days) > 0 ? `${form.validity_days} days validity` : "Set validity"} · {Number(form.daily_minutes) > 0 ? `${form.daily_minutes} min/day` : "Set daily limit"}</p>
+              </div>
               <label className="flex items-center gap-3 text-sm text-gray-300">
                 <input type="checkbox" checked={form.is_active} onChange={(e) => updateField("is_active", e.target.checked)} className="h-4 w-4 accent-green-500" />
                 Make this package active and available for new members

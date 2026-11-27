@@ -172,7 +172,7 @@ export default function PS5Bookings() {
               </select>
             </Field>
             <Field label="Booking type">
-              <select value={form.billing_type} onChange={e=>changeForm({billing_type:e.target.value,membership_id:""})} className="booking-input"><option value="normal">Regular paid booking</option><option value="membership">Membership booking — no advance deduction</option></select>
+              <select value={form.billing_type} onChange={e=>changeForm({billing_type:e.target.value,membership_id:""})} className="booking-input"><option value="normal">Regular paid booking</option><option value="membership">Membership booking</option></select>
             </Field>
             {form.billing_type === "membership" && <Field label="Select member">
               <select required value={form.membership_id} onChange={e=>changeForm({membership_id:e.target.value})} className="booking-input"><option value="">Choose active membership</option>{memberships.map(m=><option key={m.id} value={m.id}>{m.member_name} · {m.plan} · {(m.remaining_total_seconds/3600).toFixed(1)}h left</option>)}</select>
@@ -232,47 +232,139 @@ function DatePicker({value,minDate,onChange}) {
   </div>;
 }
 
-function TimePicker({value,onChange}) {
-  const [open,setOpen]=useState(false);
-  const [hour,setHour]=useState("07");
-  const [minute,setMinute]=useState("15");
-  const [period,setPeriod]=useState("AM");
-  const toParts=(time)=>{
-    const [h,m]=String(time||"19:15").split(":").map(Number);
-    return {hour:String((h%12)||12).padStart(2,"0"),minute:String(m).padStart(2,"0"),period:h>=12?"PM":"AM"};
+
+function TimePicker({ value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [hour, setHour] = useState("07");
+  const [minute, setMinute] = useState("15");
+  const [period, setPeriod] = useState("AM");
+
+  const toParts = (time) => {
+    const [h, m] = String(time || "19:15").split(":").map(Number);
+    return {
+      hour: String((h % 12) || 12).padStart(2, "0"),
+      minute: String(m).padStart(2, "0"),
+      period: h >= 12 ? "PM" : "AM"
+    };
   };
-  const display=(time)=>{
-    const p=toParts(time);return `${p.hour}:${p.minute} ${p.period}`;
+
+  const display = (time) => {
+    const p = toParts(time);
+    return `${p.hour}:${p.minute} ${p.period}`;
   };
-  const openPicker=()=>{const p=toParts(value);setHour(p.hour);setMinute(p.minute);setPeriod(p.period);setOpen(true);};
-  const save=()=>{
-    const h=Math.min(12,Math.max(1,Number(hour)||12))%12+(period==="PM"?12:0);
-    const m=Math.min(59,Math.max(0,Number(minute)||0));
-    onChange(`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`);
+
+  const openPicker = () => {
+    const p = toParts(value);
+    setHour(p.hour);
+    setMinute(p.minute);
+    setPeriod(p.period);
+    setOpen(true);
+  };
+
+  const save = () => {
+    const h = Math.min(12, Math.max(1, Number(hour) || 12)) % 12
+      + (period === "PM" ? 12 : 0);
+    const m = Math.min(59, Math.max(0, Number(minute) || 0));
+
+    onChange(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`);
     setOpen(false);
   };
-  return <>
-    <button type="button" onClick={openPicker} className="booking-input flex items-center justify-between text-left">
-      <span className="font-medium tracking-wide">{display(value)}</span><Clock3 className="w-4 h-4 text-green-400"/>
-    </button>
-    {open && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4" onMouseDown={e=>{if(e.target===e.currentTarget)setOpen(false);}}>
-      <div role="dialog" aria-modal="true" aria-label="Choose booking start time" className="w-full max-w-[360px] rounded-xl border border-[#3a3a3a] bg-[#f4f4f4] text-[#171717] shadow-2xl p-6">
-        <div className="text-[11px] tracking-[.18em] font-bold text-gray-600 mb-5">ENTER TIME</div>
-        <div className="grid grid-cols-[1fr_auto_1fr_auto] gap-2 items-start">
-          <div><input aria-label="Hour" inputMode="numeric" value={hour} onChange={e=>setHour(e.target.value.replace(/\D/g,"").slice(0,2))} onBlur={()=>setHour(String(Math.min(12,Math.max(1,Number(hour)||12))).padStart(2,"0"))} className="w-full h-[76px] rounded-md border-2 border-violet-500 bg-white text-center text-5xl text-black outline-none"/><div className="text-xs text-gray-500 mt-2">Hour</div></div>
-          <span className="text-5xl leading-[76px] font-semibold">:</span>
-          <div><input aria-label="Minute" inputMode="numeric" value={minute} onChange={e=>setMinute(e.target.value.replace(/\D/g,"").slice(0,2))} onBlur={()=>setMinute(String(Math.min(59,Math.max(0,Number(minute)||0))).padStart(2,"0"))} className="w-full h-[76px] rounded-md bg-[#dedede] text-center text-5xl text-black outline-none focus:ring-2 focus:ring-violet-500"/><div className="text-xs text-gray-500 mt-2">Minute</div></div>
-          <div className="flex flex-col rounded-md border border-gray-400 overflow-hidden text-sm font-semibold">
-            {["AM","PM"].map(x=><button key={x} type="button" onClick={()=>setPeriod(x)} className={`px-3 h-[38px] ${period===x?"bg-violet-100 text-violet-700":"bg-white text-gray-600"}`}>{x}</button>)}
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={openPicker}
+        className="booking-input flex items-center justify-between text-left"
+      >
+        <span className="font-medium tracking-wide">{display(value)}</span>
+        <Clock3 className="w-4 h-4 text-green-400" />
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Choose booking start time"
+            style={{
+              width: "min(420px, calc(100vw - 32px))",
+              maxWidth: "420px",
+              flex: "0 1 420px",
+              alignSelf: "center"
+            }}
+            className="rounded-xl border border-[#3a3a3a] bg-[#f4f4f4] text-[#171717] shadow-2xl p-5"
+          >
+            <div className="text-[11px] tracking-[.18em] font-bold text-gray-600 mb-4">
+              ENTER TIME
+            </div>
+
+            <div className="grid grid-cols-[1fr_auto_1fr_auto] gap-2 items-center">
+              <div>
+                <input
+                  aria-label="Hour"
+                  inputMode="numeric"
+                  value={hour}
+                  onChange={(e) => setHour(e.target.value.replace(/\D/g, "").slice(0, 2))}
+                  onBlur={() => setHour(String(Math.min(12, Math.max(1, Number(hour) || 12))).padStart(2, "0"))}
+                  className="w-full h-14 rounded-md border-2 border-violet-500 bg-white text-center text-3xl text-black outline-none"
+                />
+                <div className="text-xs text-gray-500 mt-1">Hour</div>
+              </div>
+
+              <span className="text-3xl font-semibold">:</span>
+
+              <div>
+                <input
+                  aria-label="Minute"
+                  inputMode="numeric"
+                  value={minute}
+                  onChange={(e) => setMinute(e.target.value.replace(/\D/g, "").slice(0, 2))}
+                  onBlur={() => setMinute(String(Math.min(59, Math.max(0, Number(minute) || 0))).padStart(2, "0"))}
+                  className="w-full h-14 rounded-md bg-[#dedede] text-center text-3xl text-black outline-none focus:ring-2 focus:ring-violet-500"
+                />
+                <div className="text-xs text-gray-500 mt-1">Minute</div>
+              </div>
+
+              <div className="flex flex-col rounded-md border border-gray-400 overflow-hidden text-xs font-semibold">
+                {["AM", "PM"].map((x) => (
+                  <button
+                    key={x}
+                    type="button"
+                    onClick={() => setPeriod(x)}
+                    className={`px-3 h-7 ${
+                      period === x
+                        ? "bg-violet-100 text-violet-700"
+                        : "bg-white text-gray-600"
+                    }`}
+                  >
+                    {x}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between mt-5">
+              <Clock3 className="w-4 h-4 text-gray-500" />
+              <div className="flex gap-5 text-sm font-bold">
+                <button type="button" onClick={() => setOpen(false)} className="text-violet-700">
+                  CANCEL
+                </button>
+                <button type="button" onClick={save} className="text-violet-700">
+                  OK
+                </button>
+              </div>
+            </div>
           </div>
         </div>
-        <div className="flex items-center justify-between mt-7">
-          <Clock3 className="w-5 h-5 text-gray-500"/>
-          <div className="flex gap-5 text-sm font-bold"><button type="button" onClick={()=>setOpen(false)} className="text-violet-700">CANCEL</button><button type="button" onClick={save} className="text-violet-700">OK</button></div>
-        </div>
-      </div>
-    </div>}
-  </>;
+      )}
+    </>
+  );
 }
 
 function Field({label,children}) { return <label className="block"><span className="block text-[11px] uppercase tracking-wider text-gray-400 font-semibold mb-1.5">{label}</span>{children}</label>; }

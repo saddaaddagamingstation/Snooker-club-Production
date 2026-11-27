@@ -518,9 +518,9 @@ function Modal({ title, onClose, children, wide = false }) {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className={`w-full ${wide ? "max-w-2xl" : "max-w-md"} max-h-[92vh] overflow-y-auto bg-[#141414] border border-[#262626] rounded-2xl shadow-2xl`}
+        className={`w-full ${wide ? "max-w-3xl" : "max-w-md"} max-h-[90vh] flex flex-col overflow-hidden bg-[#141414] border border-[#262626] rounded-2xl shadow-2xl`}
       >
-        <div className="flex items-center justify-between p-5 border-b border-[#262626]">
+        <div className="flex shrink-0 items-center justify-between px-4 py-3 border-b border-[#262626]">
           <h3 className="text-lg font-bold">{title}</h3>
           <button
             onClick={onClose}
@@ -530,7 +530,7 @@ function Modal({ title, onClose, children, wide = false }) {
             <X className="w-4 h-4" />
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="min-h-0 overflow-y-auto p-4">{children}</div>
       </div>
     </div>
   );
@@ -676,15 +676,42 @@ function StartSessionForm({ table, onSubmit, foodOrderId, pricing }) {
   const gameType = f.game_type;
   const isPool = gameType === "pool";
   const [memberships, setMemberships] = useState([]);
+  const [membershipSearch, setMembershipSearch] = useState("");
+  const [showMembershipResults, setShowMembershipResults] = useState(false);
+
   const refreshMemberships = async () => {
     const r = await api.get("/memberships");
     setMemberships(r.data || []);
   };
+
   useEffect(() => {
     if (foodOrderId || !isPS5) return;
     refreshMemberships().catch(() => setMemberships([]));
   }, [foodOrderId, isPS5]);
-  const selectedMembership = memberships.find((m) => m.id === f.membership_id);
+
+  // The memberships API exposes the member's name, phone and membership ID.
+  // Keep the existing eligibility rules and only make the eligible list searchable.
+  const eligibleMemberships = memberships.filter(
+    (m) =>
+      !m.is_expired &&
+      Number(m.remaining_seconds_today || 0) > 0 &&
+      Number(m.remaining_total_seconds || 0) > 0
+  );
+  const membershipIdOf = (m) => String(m.id || m.membership_id || "");
+  const selectedMembership = memberships.find(
+    (m) => membershipIdOf(m) === String(f.membership_id)
+  );
+  const normalizedMembershipSearch = membershipSearch.trim().toLowerCase();
+  const filteredMemberships = eligibleMemberships.filter((m) => {
+    if (!normalizedMembershipSearch) return true;
+    const searchable = [
+      m.member_name,
+      m.phone,
+      m.membership_id,
+      m.id,
+    ].filter(Boolean).join(" ").toLowerCase();
+    return searchable.includes(normalizedMembershipSearch);
+  });
   const baseRates = pricing?.[gameType]?.players || (gameType === "mini_snooker"
     ? { 2: 110, 3: 120, 4: 130, 5: 140, 6: 150 }
     : { 2: 170, 3: 170, 4: 180, 5: 220, 6: 260 });
@@ -707,7 +734,7 @@ function StartSessionForm({ table, onSubmit, foodOrderId, pricing }) {
         e.preventDefault();
         onSubmit({ ...f, game_type: gameType });
       }}
-      className="space-y-3"
+      className="space-y-2.5"
       data-testid="start-session-form"
     >
       {!isPS5 && (
@@ -718,16 +745,29 @@ function StartSessionForm({ table, onSubmit, foodOrderId, pricing }) {
         </Field>
       )}
       {!foodOrderId && isPS5 && (
-        <Field label="Billing Type">
-          <select
-            value={f.billing_type}
-            onChange={(e) => setF({ ...f, billing_type: e.target.value, membership_id: "", player_count: e.target.value === "membership" ? 1 : 2 })}
-            className="form-input"
-          >
-            <option value="normal">Timer-based billing</option>
-            <option value="membership">Membership</option>
-          </select>
-        </Field>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Field label="Billing Type">
+            <select
+              value={f.billing_type}
+              onChange={(e) => setF({ ...f, billing_type: e.target.value, membership_id: "", player_count: e.target.value === "membership" ? 1 : 2 })}
+              className="form-input"
+            >
+              <option value="normal">Timer-based billing</option>
+              <option value="membership">Membership</option>
+            </select>
+          </Field>
+          {f.billing_type === "membership" && (
+            <Field label="Customer Name (optional)">
+              <input
+                value={f.customer_name}
+                onChange={(e) => setF({ ...f, customer_name: e.target.value })}
+                data-testid="start-customer-name"
+                className="form-input"
+                placeholder="Walk-in"
+              />
+            </Field>
+          )}
+        </div>
       )}
       {f.billing_type === "normal" || foodOrderId ? (
         <div className="space-y-2.5">
@@ -814,59 +854,181 @@ function StartSessionForm({ table, onSubmit, foodOrderId, pricing }) {
       ) : (
         <div className="space-y-3">
           <Field label="Select Membership">
-            <select
-              value={f.membership_id}
-              onChange={(e) => setF({ ...f, membership_id: e.target.value })}
-              className="form-input"
-              required
-            >
-              <option value="">Choose member</option>
-              {memberships.filter((m) => !m.is_expired && m.remaining_seconds_today > 0 && m.remaining_total_seconds > 0).map((m) => (
-                <option key={m.id} value={m.id}>{m.member_name} · {m.plan} · {Math.floor(m.remaining_seconds_today / 60)} min left</option>
-              ))}
-            </select>
+            <div className="relative">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" />
+                <input
+                  type="search"
+                  value={membershipSearch}
+                  onFocus={() => setShowMembershipResults(Boolean(membershipSearch.trim()))}
+                  onChange={(e) => {
+                    setMembershipSearch(e.target.value);
+                    setShowMembershipResults(true);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setShowMembershipResults(false);
+                  }}
+                  placeholder="Search by member name, phone or membership ID"
+                  autoComplete="off"
+                  aria-label="Search memberships by member name, phone or membership ID"
+                  aria-expanded={Boolean(showMembershipResults && normalizedMembershipSearch)}
+                  aria-controls="ps5-membership-search-results"
+                  className="form-input"
+                  style={{ paddingLeft: "40px" }}
+                  data-testid="membership-search"
+                />
+              </div>
+
+              {showMembershipResults && normalizedMembershipSearch && (
+                <div className="mt-2">
+                  <div className="px-1 pb-1 text-xs text-gray-400" aria-live="polite">
+                    {filteredMemberships.length} {filteredMemberships.length === 1 ? "member" : "members"} found
+                  </div>
+                  <div
+                    id="ps5-membership-search-results"
+                    role="listbox"
+                    aria-label="Matching active memberships"
+                    className="max-h-56 overflow-y-auto overscroll-contain rounded-xl border border-[#303030] bg-[#101010] shadow-lg"
+                  >
+                  {filteredMemberships.length > 0 ? (
+                    filteredMemberships.map((m) => {
+                      const memberId = membershipIdOf(m);
+                      const isSelected = String(f.membership_id) === memberId;
+                      return (
+                        <button
+                          key={memberId}
+                          type="button"
+                          role="option"
+                          aria-selected={isSelected}
+                          onClick={() => {
+                            setF({ ...f, membership_id: memberId });
+                            setMembershipSearch("");
+                            setShowMembershipResults(false);
+                          }}
+                          className={`w-full px-3 py-3 text-left border-b border-[#242424] last:border-b-0 hover:bg-[#1c1c1c] transition-colors ${
+                            isSelected ? "bg-green-900/20" : ""
+                          }`}
+                          data-testid={`membership-option-${memberId}`}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="font-semibold text-sm text-white truncate">
+                              {m.member_name || "Unnamed member"}
+                            </span>
+                            <span className="text-xs text-green-400 shrink-0">
+                              {Math.floor(Number(m.remaining_seconds_today || 0) / 60)} min left today
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-400">
+                            <span>{m.phone || "No phone number"}</span>
+                            <span>{m.plan || "Membership"}</span>
+                            <span className="font-mono">ID: {m.membership_id || m.id}</span>
+                          </div>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <p className="px-3 py-4 text-sm text-gray-400">
+                      {eligibleMemberships.length === 0
+                        ? "No active memberships with available balance."
+                        : "No matching members found. Try another name, phone number or ID."}
+                    </p>
+                  )}
+                  </div>
+                </div>
+              )}
+
+              {selectedMembership && (
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-green-800/50 bg-green-900/10 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-green-400 truncate">
+                      {selectedMembership.member_name}
+                    </div>
+                    <div className="text-xs text-gray-400 truncate">
+                      {selectedMembership.phone || "No phone number"} · {selectedMembership.plan} membership
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setF({ ...f, membership_id: "" });
+                      setMembershipSearch("");
+                      setShowMembershipResults(false);
+                    }}
+                    className="text-xs font-semibold text-gray-300 hover:text-white shrink-0"
+                  >
+                    Change
+                  </button>
+                </div>
+              )}
+            </div>
           </Field>
-          <Field label="Number of Players">
-            <select value={f.player_count} onChange={(e) => setF({ ...f, player_count: Number(e.target.value) })} className="form-input">
-              {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n} {n === 1 ? "player" : "players"}</option>)}
-            </select>
-          </Field>
-          <div className="p-3 rounded-xl bg-amber-900/10 border border-amber-700/30 text-sm space-y-1">
-            <div className="font-semibold text-amber-300">Additional player charge per session</div>
-            <div>{f.player_count === 1 ? "1 player — Included" : `${f.player_count} players — +₹${({2:70,3:170,4:240}[f.player_count])}`}</div>
-            <div className="text-xs text-gray-400">Member is included. The extra-player fee is charged once when the session ends.</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Field label="Number of Players">
+              <select value={f.player_count} onChange={(e) => setF({ ...f, player_count: Number(e.target.value) })} className="form-input">
+                {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n} {n === 1 ? "player" : "players"}</option>)}
+              </select>
+            </Field>
+            <div className="rounded-xl bg-amber-900/10 border border-amber-700/30 px-3 py-2">
+              <div className="text-[11px] font-semibold text-amber-300 uppercase tracking-wide">Extra player charge</div>
+              <div className="mt-1 text-sm font-semibold text-white">
+                {f.player_count === 1 ? "Included" : `+₹${({2:70,3:170,4:240}[f.player_count])} per session`}
+              </div>
+              <div className="text-[11px] text-gray-400">Member included · charged at session end</div>
+            </div>
           </div>
           {selectedMembership && (
-            <div className="p-4 rounded-xl bg-[#0f0f0f] border border-green-800/50 text-sm space-y-1">
-              <div className="font-semibold text-green-400">{selectedMembership.plan} Membership</div>
-              <div>Package balance: {Math.floor((selectedMembership.remaining_total_seconds || 0) / 3600)}h {Math.floor(((selectedMembership.remaining_total_seconds || 0) % 3600) / 60)}m of {selectedMembership.total_hours || 0} hours</div>
-              <div>Daily limit: maximum 2 hours</div>
-              <div>Used today: {Math.floor(selectedMembership.used_seconds_today / 60)} minutes</div>
-              <div>Remaining today: {Math.floor(selectedMembership.remaining_seconds_today / 60)} minutes</div>
-              <div>Expires: {new Date(selectedMembership.expires_at).toLocaleDateString("en-IN")}</div>
+            <div className="rounded-xl bg-[#0f0f0f] border border-green-800/50 px-3 py-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-2">
+                <span className="text-sm font-semibold text-green-400">{selectedMembership.plan} Membership</span>
+                <span className="text-[11px] text-gray-500">Expires {new Date(selectedMembership.expires_at).toLocaleDateString("en-IN")}</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500">Package left</div>
+                  <div className="text-sm font-semibold text-white">
+                    {Math.floor((selectedMembership.remaining_total_seconds || 0) / 3600)}h {Math.floor(((selectedMembership.remaining_total_seconds || 0) % 3600) / 60)}m
+                  </div>
+                  <div className="text-[10px] text-gray-500">of {selectedMembership.total_hours || 0}h</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500">Today left</div>
+                  <div className="text-sm font-semibold text-green-400">{Math.floor(selectedMembership.remaining_seconds_today / 60)} min</div>
+                  <div className="text-[10px] text-gray-500">of 2h daily limit</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500">Used today</div>
+                  <div className="text-sm font-semibold text-white">{Math.floor(selectedMembership.used_seconds_today / 60)} min</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500">Daily limit</div>
+                  <div className="text-sm font-semibold text-white">2 hours</div>
+                </div>
+              </div>
             </div>
           )}
           {memberships.length === 0 && <p className="text-sm text-amber-400">No active memberships found. Add a member first.</p>}
         </div>
       )}
-      <Field label="Customer Name (optional)">
-        <input
-          value={f.customer_name}
-          onChange={(e) => setF({ ...f, customer_name: e.target.value })}
-          data-testid="start-customer-name"
-          className="form-input"
-          placeholder="Walk-in"
-        />
-      </Field>
+      {!(isPS5 && !foodOrderId && f.billing_type === "membership") && (
+        <Field label="Customer Name (optional)">
+          <input
+            value={f.customer_name}
+            onChange={(e) => setF({ ...f, customer_name: e.target.value })}
+            data-testid="start-customer-name"
+            className="form-input"
+            placeholder="Walk-in"
+          />
+        </Field>
+      )}
       <button
         type="submit"
         disabled={isPS5 && f.billing_type === "membership" && !f.membership_id}
         data-testid="confirm-start-session"
-        className="w-full h-12 rounded-xl bg-green-700 hover:bg-green-800 disabled:opacity-40 text-white font-semibold"
+        className="sticky bottom-0 z-10 w-full h-11 rounded-xl bg-green-700 hover:bg-green-800 disabled:opacity-40 text-white font-semibold shadow-[0_-8px_18px_rgba(20,20,20,0.9)]"
       >
         Start {gameType.replaceAll("_", " ")} Timer
       </button>
-      <style>{`.form-input{width:100%;height:42px;padding:8px 12px;border-radius:10px;background:#0f0f0f;border:1px solid #262626;color:#fff;outline:none}.form-input:focus{border-color:#15803d}`}</style>
+      <style>{`.form-input{width:100%;height:40px;padding:7px 12px;border-radius:10px;background:#0f0f0f;border:1px solid #262626;color:#fff;outline:none}.form-input:focus{border-color:#15803d}`}</style>
     </form>
   );
 }

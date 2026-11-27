@@ -214,7 +214,7 @@ export default function PS5Bookings() {
               </select>
             </Field>
             <Field label="Booking type">
-              <select value={form.billing_type} onChange={e=>changeForm({billing_type:e.target.value,membership_id:""})} className="booking-input"><option value="normal">Regular paid booking</option><option value="membership">Membership booking — no advance deduction</option></select>
+              <select value={form.billing_type} onChange={e=>changeForm({billing_type:e.target.value,membership_id:""})} className="booking-input"><option value="normal">Regular paid booking</option><option value="membership">Membership booking</option></select>
             </Field>
             {form.billing_type === "membership" && <Field label="Select member">
               <select required value={form.membership_id} onChange={e=>changeForm({membership_id:e.target.value})} className="booking-input"><option value="">Choose active membership</option>{memberships.map(m=><option key={m.id} value={m.id}>{m.member_name} · {m.plan} · {(m.remaining_total_seconds/3600).toFixed(1)}h left</option>)}</select>

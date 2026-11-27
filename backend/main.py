@@ -4,6 +4,7 @@ import secrets
 from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
 from pathlib import Path
+from collections import defaultdict, deque
 from typing import Literal
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -20,7 +21,7 @@ from typing import List, Optional, Dict
 
 import bcrypt
 import jwt
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Query, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -73,33 +74,6 @@ async def log_request_duration(request, call_next):
     return response
 
 
-@app.get("/api/diagnostics/mongodb-latency")
-async def mongodb_latency():
-    """Temporary diagnostic: measure MongoDB round-trip latency."""
-    samples = []
-
-    try:
-        for _ in range(10):
-            start = time.perf_counter()
-            await db.command("ping")
-            samples.append(round((time.perf_counter() - start) * 1000, 2))
-
-        ordered = sorted(samples)
-
-        return {
-            "samples_ms": samples,
-            "min_ms": min(samples),
-            "max_ms": max(samples),
-            "average_ms": round(sum(samples) / len(samples), 2),
-            "p95_ms": ordered[min(len(ordered) - 1, 8)],
-        }
-
-    except Exception:
-        logger.exception("MongoDB latency diagnostic failed")
-        raise HTTPException(
-            status_code=503,
-            detail="MongoDB diagnostic failed. Check Railway logs."
-        )
 
 
 # ---- Helpers ----
@@ -401,6 +375,7 @@ class MembershipPackageIn(BaseModel):
     price: float = Field(ge=0)
     total_hours: int = Field(gt=0)
     daily_minutes: int = Field(default=120, gt=0)
+    validity_days: int = Field(default=30, gt=0)
     description: Optional[str] = ""
     is_active: bool = True
 
@@ -423,7 +398,6 @@ class SnackOrderItem(BaseModel):
 class FoodOrderCreate(BaseModel):
     customer_name: Optional[str] = ""
     items: List[SnackOrderItem]
-    status: Literal["pending", "completed"] = "pending"
     discount: float = 0
     payment_method: Optional[str] = None
 
@@ -450,6 +424,7 @@ class SessionEnd(BaseModel):
     payment_notes: Optional[str] = ""
     payments: Optional[List[dict]] = None
     freeze_snapshot: Optional[FreezeSnapshot] = None
+    automatic_end: bool = False
 
 
 # ---- Expense Categories ----
@@ -774,6 +749,37 @@ def require_admin(user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Admin only")
     return user
 
+@app.get("/api/diagnostics/mongodb-latency")
+async def mongodb_latency(
+    current_user=Depends(require_admin)):
+    
+    """Temporary diagnostic: measure MongoDB round-trip latency."""
+    samples = []
+
+    try:
+        for _ in range(10):
+            start = time.perf_counter()
+            await db.command("ping")
+            samples.append(round((time.perf_counter() - start) * 1000, 2))
+
+        ordered = sorted(samples)
+
+        return {
+            "samples_ms": samples,
+            "min_ms": min(samples),
+            "max_ms": max(samples),
+            "average_ms": round(sum(samples) / len(samples), 2),
+            "p95_ms": ordered[min(len(ordered) - 1, 8)],
+        }
+
+    except Exception:
+        logger.exception("MongoDB latency diagnostic failed")
+        raise HTTPException(
+            status_code=503,
+            detail="MongoDB diagnostic failed. Check Railway logs."
+        )
+
+
 # Default staff permissions
 DEFAULT_STAFF_PERMISSIONS = {
     # Read-only access is enabled by default. Every write/manage permission is opt-in.
@@ -863,19 +869,73 @@ async def update_game_pricing(body: GamePricingUpdate, user=Depends(require_perm
     await db.settings.update_one({"key": "game_pricing"}, {"$set": {"key": "game_pricing", "value": normalized, "updated_at": iso(now_utc()), "updated_by": user["id"]}}, upsert=True)
     return normalized
 
+LOGIN_ATTEMPTS = defaultdict(deque)
+
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_WINDOW_SECONDS = 15 * 60
+
+
+def check_login_rate_limit(ip: str):
+    now = time.monotonic()
+    attempts = LOGIN_ATTEMPTS[ip]
+
+    while attempts and now - attempts[0] > LOGIN_WINDOW_SECONDS:
+        attempts.popleft()
+
+    if len(attempts) >= LOGIN_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Try again in 15 minutes."
+        )
+
+
+def record_failed_login(ip: str):
+    LOGIN_ATTEMPTS[ip].append(time.monotonic())
+
+
+def clear_login_attempts(ip: str):
+    LOGIN_ATTEMPTS.pop(ip, None)
+
 # ---- Auth Routes ----
 @api.post("/auth/login")
-async def login(req: LoginReq):
+async def login(req: LoginReq, request: Request):
+    ip = request.client.host if request.client else "unknown"
+
+    check_login_rate_limit(ip)
+
     email = req.email.lower()
     user = await db.users.find_one({"email": email})
-    if not user or not verify_password(req.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    token = create_token(user["id"], user["email"], user["role"])
+
+    if not user or not verify_password(
+        req.password,
+        user["password_hash"]
+    ):
+        record_failed_login(ip)
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password"
+        )
+
+    clear_login_attempts(ip)
+
+    token = create_token(
+        user["id"],
+        user["email"],
+        user["role"]
+    )
+
     return {
         "access_token": token,
         "user": {
-            "id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"],
-            "permissions": ({p: True for p in ALL_PERMISSIONS} if user["role"] == "admin" else normalize_permissions(user.get("permissions"))),
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
+            "role": user["role"],
+            "permissions": (
+                {p: True for p in ALL_PERMISSIONS}
+                if user["role"] == "admin"
+                else normalize_permissions(user.get("permissions"))
+            ),
         },
     }
 
@@ -901,16 +961,37 @@ async def forgot(req: ForgotReq):
             "expires_at": now_utc() + timedelta(hours=1),
             "used": False,
         })
-        logging.info(f"PASSWORD RESET LINK: /reset-password?token={token}")
-    return {"ok": True, "message": "If the email exists, a reset link has been generated (check server logs)."}
+    return {"ok": True,"message": "If the email exists, a reset link has been sent."}
 
 @api.post("/auth/reset-password")
 async def reset(req: ResetReq):
-    rec = await db.password_resets.find_one({"token": req.token, "used": False})
-    if not rec or rec["expires_at"] < now_utc():
-        raise HTTPException(status_code=400, detail="Invalid or expired token")
-    await db.users.update_one({"id": rec["user_id"]}, {"$set": {"password_hash": hash_password(req.password)}})
-    await db.password_resets.update_one({"token": req.token}, {"$set": {"used": True}})
+    rec = await db.password_resets.find_one_and_update(
+        {
+            "token": req.token,
+            "used": False,
+            "expires_at": {"$gt": now_utc()}
+        },
+        {
+            "$set": {"used": True}
+        },
+        return_document=False
+    )
+
+    if not rec:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired token"
+        )
+
+    await db.users.update_one(
+        {"id": rec["user_id"]},
+        {
+            "$set": {
+                "password_hash": hash_password(req.password)
+            }
+        }
+    )
+
     return {"ok": True}
 
 # ---- Users (admin) ----
@@ -1305,14 +1386,9 @@ async def create_category(body: CategoryIn, user=Depends(require_permission("man
 
 @api.get("/snacks")
 async def list_snacks(user=Depends(require_permission("view_snacks"))):
-    await client.admin.command("ping")
-
-    print("DB NAME EXACT:", repr(db.name))
-    print("DB NAME LENGTH:", len(db.name))
-    print("SNACK COUNT:", await db.snacks.count_documents({}))
-
     snacks = await db.snacks.find(
-        {}, {"_id": 0}
+        {},
+        {"_id": 0}
     ).sort("name", 1).to_list(1000)
 
     return snacks
@@ -1397,12 +1473,43 @@ async def create_food_order(
 
         total += subtotal
 
-    # Deduct stock
+    # Deduct stock atomically to prevent negative inventory.
+    # Combine duplicate snack IDs before deduction.
+    required_stock = {}
+
     for item in order_items:
-        await db.snacks.update_one(
-            {"id": item["snack_id"]},
-            {"$inc": {"stock_quantity": -item["quantity"]}}
+        snack_id = item["snack_id"]
+        required_stock[snack_id] = (
+            required_stock.get(snack_id, 0) + item["quantity"]
         )
+
+    deducted_stock = []
+
+    for snack_id, quantity in required_stock.items():
+        result = await db.snacks.update_one(
+            {
+                "id": snack_id,
+                "stock_quantity": {"$gte": quantity}
+            },
+            {
+                "$inc": {"stock_quantity": -quantity}
+            }
+        )
+
+        if result.modified_count == 0:
+            # Restore stock already deducted in this order.
+            for deducted_id, deducted_quantity in deducted_stock:
+                await db.snacks.update_one(
+                    {"id": deducted_id},
+                    {"$inc": {"stock_quantity": deducted_quantity}}
+                )
+
+            raise HTTPException(
+                status_code=409,
+                detail="Insufficient stock. Please refresh and try again."
+            )
+
+        deducted_stock.append((snack_id, quantity))
 
     discount = max(0, min(float(body.discount or 0), total))
     final_total = round(total - discount, 2)
@@ -1415,10 +1522,10 @@ async def create_food_order(
         "discount": round(discount, 2),
         "final_total": final_total,
         "payment_method": body.payment_method,
-        "status": body.status,
+        "status": "pending",
         "session_id": None,
         "created_at": iso(now_utc()),
-        "paid_at": iso(now_utc()) if body.status == "completed" else None,
+        "paid_at": None,
         "created_by": user["id"],
         "created_by_name": user.get("name", ""),}
 
@@ -1499,20 +1606,29 @@ async def complete_food_order(
         or "Cash"
     )
 
-    await db.food_orders.update_one(
-        {"id": order_id},
-        {
-            "$set": {
-                "status": "completed",
-                "discount": round(discount, 2),
-                "final_total": final_total,
-                "payment_method": payment_method,
-                "paid_at": iso(now_utc()),
-                "completed_by": user["id"],
-                "completed_by_name": user.get("name", ""),
-            }
+    result = await db.food_orders.update_one(
+    {
+        "id": order_id,
+        "status": "pending"
+    },
+    {
+        "$set": {
+            "status": "completed",
+            "discount": round(discount, 2),
+            "final_total": final_total,
+            "payment_method": payment_method,
+            "paid_at": iso(now_utc()),
+            "completed_by": user["id"],
+            "completed_by_name": user.get("name", ""),
         }
-    )
+    }
+)
+
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Order was already completed or changed"
+        )
 
     updated_order = await db.food_orders.find_one(
         {"id": order_id},
@@ -1543,19 +1659,12 @@ async def cancel_food_order(
             detail="Only pending food orders can be cancelled"
         )
 
-    # Restore inventory
-    for item in order.get("items", []):
-        quantity = int(item.get("quantity", 0))
-
-        if quantity > 0:
-            await db.snacks.update_one(
-                {"id": item["snack_id"]},
-                {"$inc": {"stock_quantity": quantity}}
-            )
-
-    # Mark order as cancelled
-    await db.food_orders.update_one(
-        {"id": order_id},
+    # Atomically claim the pending order before restoring stock.
+    result = await db.food_orders.update_one(
+        {
+            "id": order_id,
+            "status": "pending"
+        },
         {
             "$set": {
                 "status": "cancelled",
@@ -1565,6 +1674,22 @@ async def cancel_food_order(
             }
         }
     )
+
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Order was already cancelled or processed."
+        )
+
+    # Restore inventory only after successfully claiming cancellation.
+    for item in order.get("items", []):
+        quantity = int(item.get("quantity", 0))
+
+        if quantity > 0:
+            await db.snacks.update_one(
+                {"id": item["snack_id"]},
+                {"$inc": {"stock_quantity": quantity}}
+            )
 
     return {
         "ok": True,
@@ -1835,9 +1960,9 @@ def _membership_local_now():
     return now_utc().astimezone(CLUB_TIMEZONE)
 
 
-def _membership_expiry(activated_at):
-    """Membership expires exactly 30 days after activation."""
-    return activated_at + timedelta(days=30)
+def _membership_expiry(activated_at, validity_days=30):
+    """Return expiry using the package validity; legacy memberships default to 30 days."""
+    return activated_at + timedelta(days=max(1, int(validity_days or 30)))
 
 def _membership_day_key(dt):
     return dt.astimezone(CLUB_TIMEZONE).date().isoformat()
@@ -1997,39 +2122,51 @@ async def create_membership(body: MembershipCreate, user=Depends(require_permiss
 # ---- Membership administration ----
 
 async def _ensure_membership_packages():
-    now = iso(now_utc())
+    """One-time bootstrap only. Never recreate packages after an admin deletes them."""
+    marker = await db.settings.find_one({"key": "membership_packages_seeded_v2"})
+    if marker:
+        return
 
+    # If any package already exists, this is an established installation.
+    # Mark it initialized rather than recreating deleted defaults.
+    if await db.membership_packages.count_documents({}) > 0:
+        await db.settings.update_one(
+            {"key": "membership_packages_seeded_v2"},
+            {"$set": {"key": "membership_packages_seeded_v2", "completed_at": iso(now_utc())}},
+            upsert=True,
+        )
+        return
+
+    now = iso(now_utc())
     plans = [
         ("Bronze", 1099, 10),
         ("Silver", 2199, 20),
         ("Gold", 3199, 30),
         ("Platinum", 4199, 40),
     ]
-
     for name, price, hours in plans:
-        await db.membership_packages.update_one(
-            {"name": {"$regex": f"^{name}$", "$options": "i"}},
-            {
-                "$setOnInsert": {
-                    "id": str(uuid.uuid4()),
-                    "name": name,
-                    "price": price,
-                    "total_hours": hours,
-                    "daily_minutes": 120,
-                    "description": f"{hours} total hours · max 2 hours/day · valid 30 days",
-                    "is_active": True,
-                    "created_at": now,
-                    "updated_at": now,
-                }
-            },
-            upsert=True,
-        )
+        await db.membership_packages.insert_one({
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "price": price,
+            "total_hours": hours,
+            "daily_minutes": 120,
+            "validity_days": 30,
+            "description": f"{hours} total hours · max 2 hours/day · valid 30 days",
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+        })
 
+    await db.settings.update_one(
+        {"key": "membership_packages_seeded_v2"},
+        {"$set": {"key": "membership_packages_seeded_v2", "completed_at": iso(now_utc())}},
+        upsert=True,
+    )
 
 
 @api.get("/membership-admin/overview")
 async def membership_admin_overview(user=Depends(require_permission("view_memberships"))):
-    await _ensure_membership_packages()
     members = await db.memberships.find({}, {"_id": 0}).to_list(5000)
     now = now_utc()
     active = [m for m in members if m.get("status") == "active" and datetime.fromisoformat(m["expires_at"]) >= now]
@@ -2045,8 +2182,6 @@ async def membership_admin_overview(user=Depends(require_permission("view_member
 async def membership_packages(
     user=Depends(require_permission("view_memberships"))
 ):
-    await _ensure_membership_packages()
-
     return await db.membership_packages.find(
         {},
         {"_id": 0}
@@ -2058,7 +2193,6 @@ async def create_membership_package(body: MembershipPackageIn, user=Depends(requ
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Package name is required")
-    await _ensure_membership_packages()
     if await db.membership_packages.find_one({"name": {"$regex": f"^{name}$", "$options": "i"}}):
         raise HTTPException(status_code=409, detail="A package with this name already exists")
     now = iso(now_utc())
@@ -2173,8 +2307,6 @@ async def create_managed_member(
     body: ManagedMemberIn,
     user=Depends(require_permission("manage_memberships"))
 ):
-    await _ensure_membership_packages()
-
     package = await db.membership_packages.find_one(
         {"id": body.package_id, "is_active": True},
         {"_id": 0}
@@ -2195,7 +2327,8 @@ async def create_managed_member(
         partialFilterExpression={"member_id": {"$type": "string"}}
     )
     now = _membership_local_now()
-    expiry = _membership_expiry(now)
+    validity_days = int(package.get("validity_days", 30) or 30)
+    expiry = _membership_expiry(now, validity_days)
 
     member = {
         "id": str(uuid.uuid4()),
@@ -2205,8 +2338,9 @@ async def create_managed_member(
         "package_name": package["name"],
         "plan": package["name"].lower(),
         "monthly_fee": float(package["price"]),
-        "daily_minutes": 120,
+        "daily_minutes": int(package.get("daily_minutes", 120) or 120),
         "total_hours": int(package["total_hours"]),
+        "validity_days": validity_days,
         "payment_method": body.payment_method,
         "payment_amount": round(float(package["price"]), 2),
         "activated_at": iso(now),
@@ -2321,12 +2455,22 @@ async def update_managed_member(
         if not package:
             raise HTTPException(status_code=404, detail="Active package not found")
 
+        existing_member = await db.memberships.find_one(
+            {"id": member_id},
+            {"_id": 0, "activated_at": 1}
+        )
+        if not existing_member:
+            raise HTTPException(status_code=404, detail="Member not found")
+        activated_at = datetime.fromisoformat(existing_member["activated_at"])
+        validity_days = int(package.get("validity_days", 30) or 30)
         values.update({
             "package_name": package["name"],
             "plan": package["name"].lower(),
             "monthly_fee": float(package["price"]),
-            "daily_minutes": 120,
-            "total_hours": int(package["total_hours"])
+            "daily_minutes": int(package.get("daily_minutes", 120) or 120),
+            "total_hours": int(package["total_hours"]),
+            "validity_days": validity_days,
+            "expires_at": iso(_membership_expiry(activated_at, validity_days)),
         })
 
     result = await db.memberships.update_one(
@@ -2444,8 +2588,118 @@ async def membership_game_records(
 
     return output
 
-# ---- Persistent pre-expiry timer alerts (shared Snooker/PS5 behavior) ----
+# ---- Realtime staff alerts (shared Snooker/PS5 behavior) ----
 _timer_alert_task = None
+
+
+class StaffAlertConnections:
+    """In-process WebSocket fanout to every authorized connected staff device."""
+    def __init__(self):
+        self.connections = set()
+
+    def connect(self, websocket: WebSocket):
+        self.connections.add(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.connections.discard(websocket)
+
+    async def broadcast(self, payload: dict):
+        stale = []
+        for connection in tuple(self.connections):
+            try:
+                await connection.send_json(payload)
+            except Exception:
+                stale.append(connection)
+        for connection in stale:
+            self.disconnect(connection)
+
+
+staff_alert_connections = StaffAlertConnections()
+
+
+async def _send_timer_alert(alert: dict):
+    await staff_alert_connections.broadcast({"type": "timer_warning", "alert": alert})
+
+
+async def _send_session_ended_alert(session: dict):
+    payload = {
+        "type": "session_ended",
+        "alert": {
+            "id": f"session-ended-{session.get('id')}",
+            "session_id": session.get("id"),
+            "game_type": "PS5" if (session.get("game_type") or "").lower() == "ps5" else (session.get("game_type") or "snooker").replace("_", " ").title(),
+            "table_number": session.get("table_number") or "Unknown",
+            "customer_name": session.get("customer_name") or "Customer",
+            "grand_total": session.get("grand_total", 0),
+            "ended_at": session.get("ended_at") or session.get("end_time") or iso(now_utc()),
+        },
+    }
+    await staff_alert_connections.broadcast(payload)
+
+
+@api.websocket("/ws/alerts")
+async def staff_alerts_websocket(websocket: WebSocket):
+    # Browsers cannot attach Authorization headers to WebSocket handshakes.
+    # Authenticate with the first encrypted WebSocket message instead of a
+    # query parameter, which could otherwise be recorded in proxy access logs.
+    await websocket.accept()
+    try:
+        auth_message = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+        token = auth_message.get("token") if isinstance(auth_message, dict) and auth_message.get("type") == "authenticate" else None
+        if not token:
+            raise jwt.InvalidTokenError("Missing access token")
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+        if payload.get("type") != "access":
+            raise jwt.InvalidTokenError("Invalid token type")
+        user = await db.users.find_one({"id": payload.get("sub")}, {"_id": 0, "password_hash": 0})
+        if not user:
+            raise jwt.InvalidTokenError("User not found")
+    except (jwt.PyJWTError, asyncio.TimeoutError, ValueError, TypeError):
+        await websocket.close(code=4401, reason="Not authenticated")
+        return
+
+    if not has_permission(user, "manage_sessions"):
+        await websocket.close(code=4403, reason="Permission denied")
+        return
+
+    staff_alert_connections.connect(websocket)
+    try:
+        # Replay recent alerts after reconnect so a brief network outage does
+        # not silently lose an event. The client de-duplicates by stable ID.
+        cutoff = iso(now_utc() - timedelta(minutes=10))
+        recent_timer_alerts = await db.timer_alerts.find(
+            {"created_at": {"$gte": cutoff}}, {"_id": 0}
+        ).sort("created_at", -1).to_list(100)
+        for alert in reversed(recent_timer_alerts):
+            await websocket.send_json({"type": "timer_warning", "alert": alert})
+
+        recent_ended_sessions = await db.sessions.find(
+            {"status": "completed", "session_ended_alert_sent": True, "ended_at": {"$gte": cutoff}},
+            {"_id": 0, "id": 1, "game_type": 1, "table_number": 1, "customer_name": 1, "grand_total": 1, "ended_at": 1, "end_time": 1},
+        ).sort("ended_at", -1).to_list(100)
+        for session in reversed(recent_ended_sessions):
+            await websocket.send_json({
+                "type": "session_ended",
+                "alert": {
+                    "id": f"session-ended-{session.get('id')}",
+                    "session_id": session.get("id"),
+                    "game_type": "PS5" if (session.get("game_type") or "").lower() == "ps5" else (session.get("game_type") or "snooker").replace("_", " ").title(),
+                    "table_number": session.get("table_number") or "Unknown",
+                    "customer_name": session.get("customer_name") or "Customer",
+                    "grand_total": session.get("grand_total", 0),
+                    "ended_at": session.get("ended_at") or session.get("end_time"),
+                },
+            })
+
+        while True:
+            # Keep the connection alive and detect disconnected clients.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("Staff alerts WebSocket failed")
+    finally:
+        staff_alert_connections.disconnect(websocket)
 
 
 def _timer_alert_remaining(session, segment, now):
@@ -2487,6 +2741,7 @@ async def _scan_timer_alerts_once():
             await db.timer_alerts.insert_one(alert)
         except DuplicateKeyError:
             continue
+        await _send_timer_alert(alert)
 
 
 async def _timer_alert_worker():
@@ -2659,6 +2914,19 @@ async def clear_session(
     # -----------------------------------------
     # 1. Restore snacks back to inventory
     # -----------------------------------------
+    # Atomically claim the active session before restoring inventory.
+    result = await db.sessions.delete_one({
+        "id": session_id,
+        "status": "active"
+    })
+
+    if result.deleted_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Session was already cleared or changed"
+        )
+
+    # Restore snacks only after successfully claiming the session.
     for item in s.get("snacks", []):
         snack_id = item.get("snack_id")
         quantity = int(item.get("quantity", 0))
@@ -2668,7 +2936,6 @@ async def clear_session(
                 {"id": snack_id},
                 {"$inc": {"stock_quantity": quantity}}
             )
-
     # -----------------------------------------
     # 2. Make the table available again
     # -----------------------------------------
@@ -2684,35 +2951,28 @@ async def clear_session(
         "session_id": session_id
     })
 
-    # -----------------------------------------
-    # 5. Permanently delete the session
-    # -----------------------------------------
-    result = await db.sessions.delete_one({
-        "id": session_id,
-        "status": "active"
-    })
-
-    if result.deleted_count == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="Session was already cleared"
-        )
-
     return {
-        "ok": True,
-        "message": "Session cleared successfully",
-        "session_id": session_id,
-        "table_id": s["table_id"],
-        "table_number": s["table_number"]
-    }
+    "ok": True,
+    "message": "Session cleared successfully",
+    "session_id": session_id,
+    "table_id": s["table_id"],
+    "table_number": s["table_number"]
+}
 
 @api.post("/sessions/start")
 async def start_session(body: SessionStart, user=Depends(require_permission("manage_sessions"))):
-    table = await db.tables.find_one({"id": body.table_id}, {"_id": 0})
+    table = await db.tables.find_one(
+    {"id": body.table_id},
+    {"_id": 0}
+)
+
     if not table:
-        raise HTTPException(status_code=404, detail="Table not found")
-    if table["status"] != "available":
-        raise HTTPException(status_code=400, detail=f"Table is {table['status']}")
+        raise HTTPException(
+            status_code=404,
+            detail="Table not found"
+        )
+
+    
     is_ps5_table = table.get("game_type") == "ps5"
     if is_ps5_table:
         game_type = "ps5"
@@ -2723,6 +2983,8 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         if game_type not in supported_games:
             raise HTTPException(status_code=400, detail=f"{game_type.replace('_', ' ').title()} is not supported on this table")
     linked_booking = None
+    ps5_auto_end_at = None
+    ps5_auto_end_booking_id = None
     if game_type == "ps5":
         await _ps5_mark_no_shows()
         if body.booking_id:
@@ -2742,14 +3004,21 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
                     raise HTTPException(status_code=400, detail="Selected membership does not match this booking")
                 body.membership_id = linked_booking["membership_id"]
         else:
-            # Do not let an unreserved walk-in consume a station promised to a
-            # future customer. A booking can be started early only via booking_id.
-            future = await db.ps5_bookings.find_one({
+            # Walk-ins are allowed until 15 minutes before the earliest confirmed reservation.
+            now_for_cutoff = now_utc()
+            future_bookings = await db.ps5_bookings.find({
                 "table_id": table["id"], "status": "confirmed",
-                "start_at": {"$gt": iso(now_utc())}
-            }, {"_id": 0})
-            if future:
-                raise HTTPException(status_code=409, detail="This PS5 station has a future reservation. Start that booking or choose another station.")
+                "start_at": {"$gt": iso(now_for_cutoff)}
+            }, {"_id": 0}).sort("start_at", 1).to_list(100)
+            if future_bookings:
+                next_booking = future_bookings[0]
+                reservation_start = _ps5_parse_datetime(next_booking["start_at"])
+                ps5_auto_end_at = reservation_start - timedelta(minutes=15)
+                if ps5_auto_end_at <= now_for_cutoff:
+                    cutoff_label = ps5_auto_end_at.astimezone(CLUB_TIMEZONE).strftime("%I:%M %p").lstrip("0")
+                    reservation_label = reservation_start.astimezone(CLUB_TIMEZONE).strftime("%I:%M %p").lstrip("0")
+                    raise HTTPException(status_code=409, detail=f"Walk-ins are closed for this station. The next reservation starts at {reservation_label}; the 15-minute cutoff was {cutoff_label}.")
+                ps5_auto_end_booking_id = next_booking["id"]
     pricing = await _get_game_pricing()
     game_timer_enabled = body.billing_type == "normal" and game_type in ("snooker", "mini_snooker", "pool", "ps5")
     if game_timer_enabled:
@@ -2784,6 +3053,22 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         if await db.sessions.find_one({"membership_id": body.membership_id, "status": "active"}):
             raise HTTPException(status_code=409, detail="This member already has an active session")
     membership_player_charge = ({1: 0, 2: 70, 3: 170, 4: 240}.get(int(body.player_count or 1), 0) if membership else 0)
+    session_started_at = now_utc()
+    effective_timer_seconds = int(duration * 60) if game_timer_enabled else 0
+    initial_billing_segments = []
+    if game_timer_enabled:
+        if game_type == "ps5" and ps5_auto_end_at:
+            available_seconds = max(1, int((ps5_auto_end_at - session_started_at).total_seconds()))
+            effective_timer_seconds = min(effective_timer_seconds, available_seconds)
+            effective_minutes = max(1, math.ceil(effective_timer_seconds / 60))
+            segment = _new_fixed_segment(game_type, int(body.player_count or 1), effective_minutes, session_started_at, pricing)
+            segment["duration_seconds"] = effective_timer_seconds
+            segment["duration_minutes"] = effective_minutes
+            segment["amount"] = round(float(pricing["ps5"]["players"][str(int(body.player_count or 1))]) * effective_timer_seconds / 3600.0, 2)
+            initial_billing_segments = [segment]
+            duration = effective_minutes
+        else:
+            initial_billing_segments = [_new_fixed_segment(game_type, int(body.player_count or 2), duration, session_started_at, pricing)]
     session = {
         "id": str(uuid.uuid4()),
         "table_id": table["id"],
@@ -2797,8 +3082,11 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "membership_player_count": int(body.player_count or 1) if membership else None,
         "membership_extra_player_charge": membership_player_charge,
         "membership_usage_cursor": iso(now_utc()) if membership else None,
-        "start_time": iso(now_utc()),
+        "start_time": iso(session_started_at),
         "end_time": None,
+        "ps5_auto_end_at": iso(ps5_auto_end_at) if ps5_auto_end_at else None,
+        "ps5_auto_end_booking_id": ps5_auto_end_booking_id,
+        "ps5_auto_end_reason": "UPCOMING_RESERVATION" if ps5_auto_end_at else None,
         # Pause information
         "is_paused": False,
         "pause_started_at": None,
@@ -2812,10 +3100,10 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "rd_selected": bool(body.rd_selected) if game_type in ("snooker", "mini_snooker") else False,
         "rd_amount": float(pricing["rd_price"]) if (game_type in ("snooker", "mini_snooker") and body.rd_selected) else 0.0,
         "pricing_snapshot": pricing,
-        "game_billing_segments": [_new_fixed_segment(game_type, int(body.player_count or 2), duration, now_utc(), pricing)] if game_timer_enabled else [],
+        "game_billing_segments": initial_billing_segments,
         "timer_mode": "countdown" if game_timer_enabled else None,
-        "timer_remaining_seconds": duration * 60 if game_timer_enabled else 0,
-        "timer_started_at": iso(now_utc()) if game_timer_enabled else None,
+        "timer_remaining_seconds": effective_timer_seconds if game_timer_enabled else 0,
+        "timer_started_at": iso(session_started_at) if game_timer_enabled else None,
         "timer_expired_at": None,
         "table_amount": float(membership_player_charge),
         "snacks": [],
@@ -2830,13 +3118,93 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "payment_method": None,
         "payment_notes": "",
     }
-    await db.sessions.insert_one(session.copy())
-    if linked_booking:
-        await db.ps5_bookings.update_one(
-            {"id": linked_booking["id"], "status": "confirmed"},
-            {"$set": {"status": "started", "started_at": iso(now_utc()), "session_id": session["id"]}}
+    # Atomically reserve the table so only one request can start it.
+    claim = await db.tables.update_one(
+        {
+            "id": body.table_id,
+            "status": "available"
+        },
+        {
+            "$set": {"status": "starting"}
+        }
+    )
+
+    if claim.modified_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Table is no longer available. Please refresh."
         )
-    await db.tables.update_one({"id": table["id"]}, {"$set": {"status": "running"}})
+    try:
+        await db.sessions.insert_one(session.copy())
+    except Exception:
+        await db.tables.update_one(
+            {
+                "id": table["id"],
+                "status": "starting"
+            },
+            {
+                "$set": {"status": "available"}
+            }
+        )
+        raise   
+
+    if linked_booking:
+        booking_result = await db.ps5_bookings.update_one(
+            {"id": linked_booking["id"], "status": "confirmed"},
+            {
+                "$set": {
+                    "status": "started",
+                    "started_at": iso(now_utc()),
+                    "session_id": session["id"]
+                }
+            }
+        )
+
+        if booking_result.modified_count == 0:
+            await db.sessions.delete_one({"id": session["id"]})
+
+            await db.tables.update_one(
+                {"id": table["id"], "status": "starting"},
+                {"$set": {"status": "available"}}
+            )
+
+            raise HTTPException(
+                status_code=409,
+                detail="This booking was already started or changed. Please refresh."
+            )
+    table_result = await db.tables.update_one(
+    {
+        "id": table["id"],
+        "status": "starting"
+    },
+    {
+        "$set": {"status": "running"}
+    }
+)
+
+    if table_result.modified_count == 0:
+        await db.sessions.delete_one({"id": session["id"]})
+
+        if linked_booking:
+            await db.ps5_bookings.update_one(
+                {
+                    "id": linked_booking["id"],
+                    "status": "started",
+                    "session_id": session["id"]
+                },
+                {
+                    "$set": {
+                        "status": "confirmed",
+                        "started_at": None,
+                        "session_id": None
+                    }
+                }
+            )
+
+        raise HTTPException(
+            status_code=409,
+            detail="Table status changed while starting the session. Please refresh."
+        )
     session.pop("_id", None)
     session["table"] = table
     return session
@@ -2878,9 +3246,23 @@ async def extend_game_timer(session_id: str, body: TimerExtend, user=Depends(req
     now = now_utc()
     segments = list(s.get("game_billing_segments", []))
     pricing = s.get("pricing_snapshot") or await _get_game_pricing()
-    segments.append(_new_fixed_segment(game_type, int(s.get("player_count") or 2), duration, now, pricing))
+    extension_seconds = duration * 60
+    if game_type == "ps5" and s.get("ps5_auto_end_at"):
+        cutoff = _ps5_parse_datetime(s["ps5_auto_end_at"])
+        remaining_to_cutoff = int((cutoff - now).total_seconds())
+        if remaining_to_cutoff <= 0:
+            raise HTTPException(status_code=409, detail="The 15-minute reservation cutoff has been reached. This session will end automatically.")
+        extension_seconds = min(extension_seconds, remaining_to_cutoff)
+        extension_minutes = max(1, math.ceil(extension_seconds / 60))
+        segment = _new_fixed_segment(game_type, int(s.get("player_count") or 1), extension_minutes, now, pricing)
+        segment["duration_seconds"] = extension_seconds
+        segment["duration_minutes"] = extension_minutes
+        segment["amount"] = round(float(pricing["ps5"]["players"][str(int(s.get("player_count") or 1))]) * extension_seconds / 3600.0, 2)
+        segments.append(segment)
+    else:
+        segments.append(_new_fixed_segment(game_type, int(s.get("player_count") or 2), duration, now, pricing))
     await db.sessions.update_one({"id": session_id}, {"$set": {
-        "timer_mode": "countdown", "timer_remaining_seconds": duration * 60,
+        "timer_mode": "countdown", "timer_remaining_seconds": extension_seconds,
         "timer_started_at": iso(now), "timer_expired_at": None,
         "game_billing_segments": segments,
     }})
@@ -2936,19 +3318,51 @@ async def add_snack_to_session(session_id: str, body: SnackOrderItem, user=Depen
     else:
         snacks.append(item)
     snacks_amount = sum(i["subtotal"] for i in snacks)
-    await db.sessions.update_one(
-        {"id": session_id},
-        {"$set": {"snacks": snacks, "snacks_amount": snacks_amount}},
+    # Deduct stock atomically before updating the session.
+    stock_result = await db.snacks.update_one(
+        {
+            "id": snack["id"],
+            "stock_quantity": {"$gte": body.quantity}
+        },
+        {
+            "$inc": {"stock_quantity": -body.quantity}
+        }
     )
-    # decrement stock
-    new_stock = max(0, int(snack.get("stock_quantity", 0)) - body.quantity)
-    await db.snacks.update_one({"id": snack["id"]}, {"$set": {"stock_quantity": new_stock}})
-    s["snacks"] = snacks
-    s["snacks_amount"] = snacks_amount
-    s["table"] = await db.tables.find_one(
-        {"id": s["table_id"]},
-        {"_id": 0}
-    )
+
+    if stock_result.modified_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Insufficient stock. Please refresh and try again."
+        )
+
+    # Update the session only after stock deduction succeeds.
+    try:
+        session_result = await db.sessions.update_one(
+            {
+                "id": session_id,
+                "status": "active"
+            },
+            {
+                "$set": {
+                    "snacks": snacks,
+                    "snacks_amount": snacks_amount
+                }
+            }
+        )
+
+        if session_result.modified_count == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Session is no longer active. Please refresh."
+            )
+
+    except Exception:
+        # Restore stock if the session update fails.
+        await db.snacks.update_one(
+            {"id": snack["id"]},
+            {"$inc": {"stock_quantity": body.quantity}}
+        )
+        raise
     s["snacks_total"] = snacks_amount
 
     return s
@@ -2959,53 +3373,73 @@ async def remove_snack_from_session(
     index: int,
     user=Depends(require_permission("manage_sessions"))
 ):
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    if not s or s["status"] != "active":
-        raise HTTPException(status_code=400, detail="Session is not active")
+    s = await db.sessions.find_one(
+        {"id": session_id, "status": "active"},
+        {"_id": 0}
+    )
+
+    if not s:
+        raise HTTPException(
+            status_code=400,
+            detail="Session is not active"
+        )
 
     snacks = s.get("snacks", [])
 
     if index < 0 or index >= len(snacks):
-        raise HTTPException(status_code=404, detail="Item not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Item not found"
+        )
 
     item = snacks[index]
+    snack_id = item["snack_id"]
 
+    # Remove one unit from the session cart.
     if item["quantity"] > 1:
-        # Decrease quantity by 1
         item["quantity"] -= 1
         item["subtotal"] = item["quantity"] * item["price"]
-
-        # Restock only 1 item
-        await db.snacks.update_one(
-            {"id": item["snack_id"]},
-            {"$inc": {"stock_quantity": 1}}
-        )
-
     else:
-        # Remove snack completely
-        removed = snacks.pop(index)
+        snacks.pop(index)
 
-        await db.snacks.update_one(
-            {"id": removed["snack_id"]},
-            {"$inc": {"stock_quantity": 1}}
-        )
+    snacks_amount = round(
+        sum(float(i.get("subtotal", 0)) for i in snacks),
+        2
+    )
 
-    # Recalculate total snacks amount
-    snacks_amount = sum(i["subtotal"] for i in snacks)
-
-    await db.sessions.update_one(
-        {"id": session_id},
+    # Save the session first, only if it is still active
+    result = await db.sessions.update_one(
+        {
+            "id": session_id,
+            "status": "active"
+        },
         {
             "$set": {
                 "snacks": snacks,
-                "snacks_amount": snacks_amount,
+                "snacks_amount": snacks_amount
             }
         }
     )
 
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    await _session_with_details(s)
-    return s
+    if result.modified_count == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Session changed. Please refresh and try again."
+        )
+
+    # Restore exactly one unit after successful session update.
+    await db.snacks.update_one(
+        {"id": snack_id},
+        {"$inc": {"stock_quantity": 1}}
+    )
+
+    updated_session = await db.sessions.find_one(
+        {"id": session_id},
+        {"_id": 0}
+    )
+
+    await _session_with_details(updated_session)
+    return updated_session
 
 @api.post("/sessions/{session_id}/pause")
 async def pause_session(
@@ -3196,65 +3630,52 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
+    automatic_end = bool(body.automatic_end and s.get("game_type") == "ps5" and s.get("ps5_auto_end_at"))
+    end = _ps5_parse_datetime(s["ps5_auto_end_at"]) if automatic_end else now_utc()
+    if automatic_end and end > now_utc():
+        raise HTTPException(status_code=409, detail="PS5 reservation cutoff has not been reached yet")
     if s.get("game_timer_enabled"):
-        s = await _sync_game_timer(s, now_utc())
+        s = await _sync_game_timer(s, end)
     if s.get("billing_type") == "membership" and not s.get("is_paused"):
-        s = await _settle_membership_usage(s, now_utc())
-    # Determine authoritative end timestamp
+        s = await _settle_membership_usage(s, end)
+
+    # Use the exact reservation cutoff timestamp even if the worker wakes late.
     start_dt = datetime.fromisoformat(s["start_time"])
-    now = now_utc()
-    if body.freeze_snapshot:
-        try:
-            snap_end = datetime.fromisoformat(body.freeze_snapshot.end_time)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid freeze_snapshot.end_time")
-        # Validate: must be between start_time and now, and monetary values non-negative
-        if snap_end < start_dt or snap_end > now + timedelta(seconds=5):
-            raise HTTPException(status_code=400, detail="freeze_snapshot.end_time out of range")
-        if body.freeze_snapshot.duration_minutes < 0 or body.freeze_snapshot.table_amount < 0:
-            raise HTTPException(status_code=400, detail="freeze_snapshot values must be non-negative")
-        end = snap_end
-        rate = float(s["rate_used"])
 
-        paused_seconds = float(s.get("paused_seconds", 0))
+    paused_seconds = float(s.get("paused_seconds", 0))
 
-        if s.get("is_paused") and s.get("pause_started_at"):
-            pause_started = datetime.fromisoformat(s["pause_started_at"])
-            paused_seconds += (end - pause_started).total_seconds()
-
-        duration_seconds = max(
+    if s.get("is_paused") and s.get("pause_started_at"):
+        pause_started = datetime.fromisoformat(
+            s["pause_started_at"]
+        )
+        paused_seconds += max(
             0,
-            (end - start_dt).total_seconds() - paused_seconds
+            (end - pause_started).total_seconds()
         )
 
-        duration_minutes = int(duration_seconds / 60)
-    else:
-        end = now
-        rate = float(s["rate_used"])
-
-        paused_seconds = float(s.get("paused_seconds", 0))
-
-        if s.get("is_paused") and s.get("pause_started_at"):
-            pause_started = datetime.fromisoformat(s["pause_started_at"])
-            paused_seconds += (end - pause_started).total_seconds()
-
-        duration_seconds = max(
-            0,
-            (end - start_dt).total_seconds() - paused_seconds
-        )
+    duration_seconds = max(
+        0,
+        (end - start_dt).total_seconds() - paused_seconds
+    )
 
     duration_minutes = int(duration_seconds / 60)
+    rate = float(s.get("rate_used", 0))
 
-    # All non-timer sessions are billed from the full session duration.
+    # Calculate table amount using the same billing logic as finalize-preview.
     if s.get("game_timer_enabled"):
         duration_seconds = _game_timer_played_seconds(s, end)
         duration_minutes = int(duration_seconds / 60)
         table_amount = _game_timer_amount(s, end)
+
     elif s.get("billing_type") == "membership":
         table_amount = float(s.get("membership_extra_player_charge", 0))
+
     else:
-        table_amount = round((duration_seconds / 3600.0) * rate, 2)
-    payment_method = (body.payment_method or "cash").lower()
+        table_amount = round(
+            (duration_seconds / 3600.0) * rate, 2
+        )
+
+    payment_method = "credit" if automatic_end else (body.payment_method or "cash").lower()
     if payment_method not in PAYMENT_METHODS:
         raise HTTPException(status_code=400, detail=f"Invalid payment_method. Allowed: {', '.join(PAYMENT_METHODS)}")
     # Use freeze_snapshot from the modal if provided; otherwise compute fresh from now.
@@ -3266,24 +3687,52 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
     ),
     2,
     )
-    discount = float(body.discount or 0)
-    tax_percent = float(body.tax_percent or 0)
+    
     rd_amount = (
         round(float(s.get("rd_amount") or 0), 2)
         if s.get("rd_selected") and _game_type(s) in ("snooker", "mini_snooker")
         else 0.0
     )
-    # Avoid charging RD twice for timer sessions, where _game_timer_amount includes it.
+
     rd_additional = 0.0 if s.get("game_timer_enabled") else rd_amount
-    subtotal = table_amount + rd_additional + snacks_amount - discount
-    tax_amount = round(subtotal * tax_percent / 100, 2)
+
+    gross_subtotal = (
+        table_amount + rd_additional + snacks_amount
+    )
+
+    discount = float(body.discount or 0)
+    tax_percent = float(body.tax_percent or 0)
+
+    # Validate discount
+    if not 0 <= discount <= gross_subtotal:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid discount amount"
+        )
+
+    # Validate tax
+    if not 0 <= tax_percent <= 100:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid tax percentage"
+        )
+
+    subtotal = gross_subtotal - discount
+
+    tax_amount = round(
+        subtotal * tax_percent / 100,
+        2
+    )
+
     grand_total_exact = round(subtotal + tax_amount, 2)
     grand_total = int(round(grand_total_exact))  # nearest whole rupee — frozen
     invoice_no = "INV-" + datetime.now().strftime("%Y%m%d") + "-" + s["id"][:6].upper()
 
-    # Split payments: normalize and validate. Fallback to single payment_method for full amount.
+    # Auto-ended sessions are invoiced as credit/outstanding, never as collected cash.
     split_payments = []
-    if body.payments:
+    if automatic_end:
+        split_payments = [{"method": "credit", "amount": grand_total}] if grand_total > 0 else []
+    elif body.payments:
         for p in body.payments:
             m = (p.get("method") or "").lower()
             amt = float(p.get("amount") or 0)
@@ -3291,12 +3740,12 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
                 raise HTTPException(status_code=400, detail=f"Invalid payment method '{m}'")
             if amt > 0:
                 split_payments.append({"method": m, "amount": round(amt, 2)})
-    if not split_payments:
+    if not split_payments and not automatic_end:
         split_payments = [{"method": payment_method, "amount": grand_total}]
     total_paid = round(sum(p["amount"] for p in split_payments), 2)
-    if abs(total_paid - grand_total) > 0.5:
+    if not automatic_end and abs(total_paid - grand_total) > 0.5:
         raise HTTPException(status_code=400, detail=f"Payments ({total_paid}) don't match total ({grand_total})")
-    primary_method = split_payments[0]["method"] if len(split_payments) == 1 else "split"
+    primary_method = "credit" if automatic_end else (split_payments[0]["method"] if len(split_payments) == 1 else "split")
 
     update = {
         "end_time": iso(end),
@@ -3314,7 +3763,8 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         "ended_at": iso(end),
         "payment_method": primary_method,
         "payments": split_payments,
-        "payment_notes": body.payment_notes or "",
+        "payment_notes": ("Automatically ended 15 minutes before the next PS5 reservation. Payment pending as credit." if automatic_end else (body.payment_notes or "")),
+        "automatic_end_reason": "UPCOMING_RESERVATION" if automatic_end else None,
         "ended_by": user["id"],
         "ended_by_name": user.get("name", ""),
     }
@@ -3356,6 +3806,15 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         {"id": session_id},
         {"_id": 0}
     )
+    # Atomic marker guarantees the realtime event is broadcast once even if
+    # the end request is retried or two staff devices submit close together.
+    alert_marker = await db.sessions.update_one(
+        {"id": session_id, "status": "completed", "session_ended_alert_sent": {"$ne": True}},
+        {"$set": {"session_ended_alert_sent": True}},
+    )
+    if alert_marker.modified_count:
+        s["session_ended_alert_sent"] = True
+        await _send_session_ended_alert(s)
     await _session_with_details(s)
     return s
 
@@ -3380,7 +3839,9 @@ async def continue_membership_as_normal(session_id: str, user=Depends(require_pe
         "grand_total": 0, "grand_total_exact": 0.0, "discount": 0.0,
         "tax_amount": 0.0, "payment_method": "membership", "membership_converted": True,
         "ended_by": user["id"], "ended_by_name": user.get("name", ""),
+        "session_ended_alert_sent": True,
     }})
+    await _send_session_ended_alert({**old, "grand_total": 0, "ended_at": iso(exhausted_at)})
     new_session = {
         "id": str(uuid.uuid4()), "table_id": table["id"], "table_number": table["table_number"],
         "customer_name": old.get("customer_name", ""), "notes": old.get("notes", ""),
@@ -5068,6 +5529,7 @@ async def seed():
         logger.info("Seeded default tables")
 
 _ps5_no_show_task = None
+_ps5_reservation_cutoff_task = None
 
 async def _ps5_no_show_worker():
     while True:
@@ -5078,22 +5540,109 @@ async def _ps5_no_show_worker():
         await asyncio.sleep(30)
 
 
+async def _ps5_reservation_cutoff_worker():
+    """Close walk-in PS5 sessions at the 15-minute reservation buffer."""
+    system_user = {"id": "system-ps5-reservation-cutoff", "name": "Automatic PS5 Reservation Cutoff"}
+    while True:
+        try:
+            now = now_utc()
+            due_sessions = await db.sessions.find({
+                "status": "active", "game_type": "ps5",
+                "ps5_auto_end_at": {"$lte": iso(now), "$ne": None},
+            }, {"_id": 0, "id": 1, "table_id": 1, "ps5_auto_end_booking_id": 1}).to_list(200)
+            for row in due_sessions:
+                session_id = row["id"]
+                cutoff_booking = None
+                if row.get("ps5_auto_end_booking_id"):
+                    cutoff_booking = await db.ps5_bookings.find_one({
+                        "id": row["ps5_auto_end_booking_id"], "status": "confirmed",
+                    }, {"_id": 0})
+                if not cutoff_booking:
+                    next_booking = await db.ps5_bookings.find({
+                        "table_id": row.get("table_id"), "status": "confirmed",
+                        "start_at": {"$gt": iso(now)},
+                    }, {"_id": 0}).sort("start_at", 1).to_list(1)
+                    if not next_booking:
+                        await db.sessions.update_one(
+                            {"id": session_id, "status": "active"},
+                            {"$set": {
+                                "ps5_auto_end_at": None,
+                                "ps5_auto_end_booking_id": None,
+                                "ps5_auto_end_reason": None,
+                                "ps5_auto_end_claimed": False,
+                            }},
+                        )
+                        continue
+                    cutoff_booking = next_booking[0]
+                    revised_cutoff = _ps5_parse_datetime(cutoff_booking["start_at"]) - timedelta(minutes=15)
+                    await db.sessions.update_one(
+                        {"id": session_id, "status": "active"},
+                        {"$set": {
+                            "ps5_auto_end_at": iso(revised_cutoff),
+                            "ps5_auto_end_booking_id": cutoff_booking["id"],
+                        }},
+                    )
+                    if revised_cutoff > now:
+                        continue
+                claim = await db.sessions.update_one(
+                    {
+                        "id": session_id, "status": "active",
+                        "ps5_auto_end_at": {"$lte": iso(now), "$ne": None},
+                        "$or": [
+                            {"ps5_auto_end_claimed": {"$ne": True}},
+                            {"ps5_auto_end_claimed_at": {"$lte": iso(now - timedelta(minutes=2))}},
+                        ],
+                    },
+                    {"$set": {"ps5_auto_end_claimed": True, "ps5_auto_end_claimed_at": iso(now)}},
+                )
+                if not claim.modified_count:
+                    continue
+                try:
+                    await end_session(
+                        session_id,
+                        SessionEnd(automatic_end=True, payment_notes="Automatically ended before upcoming PS5 reservation."),
+                        user=system_user,
+                    )
+                    logger.info("Automatically ended PS5 session %s at reservation cutoff", session_id)
+                except HTTPException as exc:
+                    if exc.status_code != 400:
+                        await db.sessions.update_one(
+                            {"id": session_id, "status": "active"},
+                            {"$set": {"ps5_auto_end_claimed": False}},
+                        )
+                    logger.warning("Could not automatically end PS5 session %s: %s", session_id, exc.detail)
+                except Exception:
+                    await db.sessions.update_one(
+                        {"id": session_id, "status": "active"},
+                        {"$set": {"ps5_auto_end_claimed": False}},
+                    )
+                    logger.exception("Automatic PS5 cutoff failed for session %s", session_id)
+        except Exception:
+            logger.exception("PS5 reservation cutoff worker failed")
+        await asyncio.sleep(1)
+
+
 @app.on_event("startup")
 async def on_startup():
-    global _ps5_no_show_task, _timer_alert_task
+    global _ps5_no_show_task, _ps5_reservation_cutoff_task, _timer_alert_task
     await seed()
     await ensure_performance_indexes()
     await db.timer_alerts.create_index("timer_block_id", unique=True)
     await db.timer_alerts.create_index("created_at")
+    await db.sessions.create_index(
+        [("status", 1), ("session_ended_alert_sent", 1), ("ended_at", 1)],
+        name="idx_recent_session_end_alerts",
+    )
     await db.timer_alert_deliveries.create_index([("alert_id", 1), ("user_id", 1)], unique=True)
     _ps5_no_show_task = asyncio.create_task(_ps5_no_show_worker())
+    _ps5_reservation_cutoff_task = asyncio.create_task(_ps5_reservation_cutoff_worker())
     _timer_alert_task = asyncio.create_task(_timer_alert_worker())
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    global _ps5_no_show_task, _timer_alert_task
-    for task in (_ps5_no_show_task, _timer_alert_task):
+    global _ps5_no_show_task, _ps5_reservation_cutoff_task, _timer_alert_task
+    for task in (_ps5_no_show_task, _ps5_reservation_cutoff_task, _timer_alert_task):
         if task:
             task.cancel()
             try:

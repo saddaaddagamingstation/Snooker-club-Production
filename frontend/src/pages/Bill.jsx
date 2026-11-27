@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import api, { inr } from "@/lib/api";
 import {
@@ -8,7 +8,7 @@ import {
   ArrowLeft,
   Circle,
 } from "lucide-react";
-import html2pdf from "html2pdf.js";
+import { jsPDF } from "jspdf";
 
 export default function Bill() {
   const { id } = useParams();
@@ -51,6 +51,28 @@ export default function Bill() {
   const playerCountLabel =
     Number(s.player_count) > 0 ? `${s.player_count} player${Number(s.player_count) === 1 ? "" : "s"}` : null;
 
+  const membershipState = s.membership_state || null;
+  const isPs5Membership = String(s.game_type || "").toLowerCase() === "ps5" && s.billing_type === "membership";
+  const dailyUsagePercent = membershipState?.daily_minutes > 0
+    ? Math.min(100, (Number(membershipState.used_seconds_today || 0) / (Number(membershipState.daily_minutes) * 60)) * 100)
+    : 0;
+  const formatDuration = (seconds = 0) => {
+    const safeSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+    const h = Math.floor(safeSeconds / 3600);
+    const m = Math.floor((safeSeconds % 3600) / 60);
+    return h > 0 ? `${h}h ${m}m` : `${m} min`;
+  };
+  const membershipDaysLeft = membershipState?.expires_at
+    ? Math.max(
+        0,
+        Math.ceil(
+          (new Date(membershipState.expires_at).getTime() -
+            new Date(membershipState.as_of || s.ended_at || Date.now()).getTime()) /
+            86400000,
+        ),
+      )
+    : null;
+
   const groupedSnacks = Object.values(
     (s.snacks || []).reduce((acc, item) => {
       const key = item.name;
@@ -71,99 +93,276 @@ export default function Bill() {
   );
 
   const downloadInvoicePdf = async () => {
-    const element = document.getElementById("printable-bill");
-
-    if (!element) {
-      alert("Invoice not found.");
-      return;
-    }
-
-    const invoiceNumber = String(s.invoice_no || id).replace(
-      /[^a-zA-Z0-9_-]/g,
-      "_",
-    );
+    const invoiceNumber = String(s.invoice_no || id).replace(/[^a-zA-Z0-9_-]/g, "_");
     const filename = `${invoiceNumber}.pdf`;
 
     try {
-      await html2pdf()
-        .set({
-          margin: [4, 4, 4, 4],
-          filename,
-          image: {
-            type: "jpeg",
-            quality: 0.98,
-          },
-          html2canvas: {
-            scale: 2,
-            useCORS: true,
-            backgroundColor: "#ffffff",
-            onclone: (clonedDoc) => {
-              const clonedBill = clonedDoc.getElementById("printable-bill");
+      // Vector-based A4 PDF, laid out to mirror the compact browser print view.
+      const doc = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4",
+        compress: true,
+      });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 10;
+      const contentWidth = pageWidth - margin * 2;
+      const right = pageWidth - margin;
+      const green = [22, 163, 74];
+      const dark = [17, 24, 39];
+      const muted = [107, 114, 128];
+      const light = [229, 231, 235];
+      let y = 12;
 
-              if (!clonedBill) return;
+      const money = (value) =>
+        `Rs. ${Number(value || 0).toLocaleString("en-IN", {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
+      const dateTime = (value) =>
+        value ? new Date(value).toLocaleString("en-IN") : "—";
+      const setText = (size, color = dark, style = "normal") => {
+        doc.setFont("helvetica", style);
+        doc.setFontSize(size);
+        doc.setTextColor(...color);
+        if (typeof doc.setCharSpace === "function") doc.setCharSpace(0);
+      };
+      const rule = (yy = y) => {
+        doc.setDrawColor(...light);
+        doc.setLineWidth(0.25);
+        doc.line(margin + 1, yy, right - 1, yy);
+      };
+      const section = (label) => {
+        setText(7.5, dark, "bold");
+        doc.text(String(label).toUpperCase(), margin + 1, y);
+        y += 4;
+      };
+      const detail = (label, value, x, yy, width, align = "left") => {
+        setText(7, muted);
+        doc.text(String(label).toUpperCase(), x, yy);
+        setText(9, dark, "bold");
+        const lines = doc.splitTextToSize(String(value ?? "—"), width);
+        doc.text(lines, align === "right" ? x + width : x, yy + 4, { align });
+        return lines.length;
+      };
+      const ensureSpace = (height) => {
+        if (y + height > pageHeight - 13) {
+          doc.addPage();
+          y = 12;
+        }
+      };
 
-              const compactPrintStyle = clonedDoc.createElement("style");
-              compactPrintStyle.textContent = `
-                @page { size: A4 portrait; margin: 4mm !important; }
-                #printable-bill {
-                  box-sizing: border-box !important;
-                  width: 100% !important;
-                  max-width: 100% !important;
-                  padding: 6mm !important;
-                  border-radius: 0 !important;
-                  font-size: 10px !important;
-                  line-height: 1.2 !important;
-                }
-                #printable-bill .text-2xl { font-size: 18px !important; line-height: 1.2 !important; }
-                #printable-bill .text-4xl { font-size: 25px !important; line-height: 1.1 !important; }
-                #printable-bill .pb-6 { padding-bottom: 8px !important; }
-                #printable-bill .py-6 { padding-top: 8px !important; padding-bottom: 8px !important; }
-                #printable-bill .pt-4 { padding-top: 8px !important; }
-                #printable-bill .mt-8 { margin-top: 8px !important; }
-                #printable-bill .mt-2 { margin-top: 3px !important; }
-                #printable-bill .gap-6 { gap: 8px !important; }
-                #printable-bill .gap-3 { gap: 8px !important; }
-                #printable-bill .space-y-2 > :not([hidden]) ~ :not([hidden]) { margin-top: 4px !important; }
-                #printable-bill .space-y-1.5 > :not([hidden]) ~ :not([hidden]) { margin-top: 3px !important; }
-                #printable-bill th { padding-bottom: 4px !important; }
-                #printable-bill td { padding-top: 4px !important; padding-bottom: 4px !important; }
-                #printable-bill tr { break-inside: avoid !important; page-break-inside: avoid !important; }
-                #printable-bill table { font-size: 10px !important; }
-              `;
-              clonedDoc.head.appendChild(compactPrintStyle);
+      // Thin page frame, matching the browser's print border.
+      doc.setDrawColor(209, 213, 219);
+      doc.setLineWidth(0.35);
+      doc.rect(4, 4, pageWidth - 8, pageHeight - 8);
 
-              const forceStyle = (element, property, value) => {
-                element.style.setProperty(property, value, "important");
-              };
+      // Header
+      doc.setDrawColor(31, 41, 55);
+      doc.setLineWidth(0.6);
+      doc.circle(margin + 4, y + 3.5, 2.5, "S");
+      setText(7, dark, "bold");
+      doc.text("TAX INVOICE", margin + 10, y + 2);
+      setText(12, dark, "bold");
+      doc.text(String(club || "Sadda Adda Snooker"), margin + 10, y + 7);
+      setText(7, dark, "bold");
+      doc.text("INVOICE NO", right, y, { align: "right" });
+      setText(7, muted);
+      doc.text(String(s.invoice_no || id), right, y + 3.5, { align: "right" });
+      doc.text(dateTime(s.ended_at), right, y + 7, { align: "right" });
+      y += 13;
+      rule();
+      y += 5;
 
-              forceStyle(clonedBill, "background-color", "#ffffff");
-              forceStyle(clonedBill, "color", "#000000");
-              forceStyle(clonedBill, "opacity", "1");
-              forceStyle(clonedBill, "animation", "none");
-              forceStyle(clonedBill, "transform", "none");
-              forceStyle(clonedBill, "box-shadow", "none");
+      // Compact two-column session details.
+      const colGap = 8;
+      const colWidth = (contentWidth - colGap) / 2;
+      const leftX = margin + 1;
+      const rightX = margin + colWidth + colGap;
+      const details = [
+        ["Customer", s.customer_name || "Walk-in", "Table", `${s.table_number ?? "—"}${s.table?.table_name ? ` · ${s.table.table_name}` : ""}`],
+        ["Start", dateTime(s.start_time), "End", dateTime(s.end_time || s.ended_at)],
+        ["Game", gameTypeLabel, "Billing", billingTypeLabel],
+        ...(playerCountLabel ? [["Players", playerCountLabel, s.rd_selected ? "R.D." : "", s.rd_selected ? "Selected" : ""]] : []),
+      ];
+      for (const [label1, value1, label2, value2] of details) {
+        detail(label1, value1, leftX, y, colWidth - 2);
+        if (label2) detail(label2, value2, rightX, y, colWidth - 2);
+        y += 12;
+      }
+      rule();
+      y += 5;
 
-              clonedBill.querySelectorAll("*").forEach((el) => {
-                forceStyle(el, "background-color", "#ffffff");
-                forceStyle(el, "color", "#000000");
-                forceStyle(el, "border-color", "#dddddd");
-                forceStyle(el, "opacity", "1");
-                forceStyle(el, "animation", "none");
-                forceStyle(el, "text-shadow", "none");
-              });
-            },
-          },
-          jsPDF: {
-            unit: "mm",
-            format: "a4",
-            orientation: "portrait",
-          },
-        })
-        .from(element)
-        .save();
+      // Membership summary: compact outlined metric cards like the print view.
+      if (s.billing_type === "membership" && membershipState) {
+        ensureSpace(49);
+        section(isPs5Membership ? "PS5 Membership Summary" : "Membership Summary");
+        setText(8.5, dark, "bold");
+        doc.text(
+          `${membershipState.member_name || s.customer_name || "Member"}${membershipState.plan ? ` · ${membershipState.plan}` : ""}`,
+          margin + 1,
+          y,
+        );
+        setText(7, membershipState.is_expired ? [220, 38, 38] : green, "bold");
+        doc.text(membershipState.is_expired ? "EXPIRED" : "ACTIVE", right - 1, y, { align: "right" });
+        y += 5;
+
+        const metrics = [
+          ["Played today", formatDuration(membershipState.used_seconds_today)],
+          ["Today's time left", formatDuration(membershipState.remaining_seconds_today)],
+          ["Total membership time left", formatDuration(membershipState.remaining_total_seconds)],
+          ["Membership validity left", membershipDaysLeft === null ? "—" : `${membershipDaysLeft} days`],
+        ];
+        const cardGap = 4;
+        const cardWidth = (contentWidth - cardGap) / 2;
+        const cardHeight = 13;
+        metrics.forEach(([label, value], index) => {
+          const x = margin + (index % 2) * (cardWidth + cardGap);
+          const rowY = y + Math.floor(index / 2) * (cardHeight + 2);
+          doc.setDrawColor(...light);
+          doc.setLineWidth(0.3);
+          doc.roundedRect(x, rowY, cardWidth, cardHeight, 2, 2, "S");
+          setText(6.5, muted);
+          doc.text(label, x + 3, rowY + 4);
+          setText(9.5, index === 1 ? green : dark, "bold");
+          doc.text(value, x + 3, rowY + 10);
+        });
+        y += (cardHeight + 2) * 2 + 2;
+
+        setText(7, muted);
+        doc.text("Today's usage", margin + 1, y + 1);
+        doc.text(
+          `${formatDuration(membershipState.used_seconds_today)} / ${membershipState.daily_minutes || 0} min`,
+          right - 1,
+          y + 1,
+          { align: "right" },
+        );
+        y += 3;
+        const barWidth = contentWidth - 2;
+        doc.setFillColor(229, 231, 235);
+        doc.roundedRect(margin + 1, y, barWidth, 2, 1, 1, "F");
+        if (dailyUsagePercent > 0) {
+          doc.setFillColor(...green);
+          doc.roundedRect(margin + 1, y, barWidth * dailyUsagePercent / 100, 2, 1, 1, "F");
+        }
+        y += 5;
+        setText(6.5, muted);
+        doc.text(
+          `Daily allowance: ${membershipState.daily_minutes || 0} minutes${membershipState.expires_at ? ` · Expires ${new Date(membershipState.expires_at).toLocaleDateString("en-IN")}` : ""}`,
+          margin + 1,
+          y,
+        );
+        y += 6;
+        rule();
+        y += 5;
+      }
+
+      // Itemized charges.
+      section("Description");
+      const itemX = margin + 1;
+      const qtyX = margin + contentWidth * 0.62;
+      const rateX = margin + contentWidth * 0.80;
+      const amountX = right - 1;
+      setText(7, muted, "bold");
+      doc.text("ITEM", itemX, y);
+      doc.text("QTY", qtyX, y, { align: "right" });
+      doc.text("RATE", rateX, y, { align: "right" });
+      doc.text("AMOUNT", amountX, y, { align: "right" });
+      y += 3;
+      rule();
+      y += 4;
+
+      const addItem = (name, qty, rate, amount) => {
+        const nameLines = doc.splitTextToSize(String(name), contentWidth * 0.52);
+        const rowHeight = Math.max(7, nameLines.length * 3.5 + 3);
+        ensureSpace(rowHeight + 2);
+        setText(7.5, dark);
+        doc.text(nameLines, itemX, y);
+        doc.text(String(qty), qtyX, y, { align: "right" });
+        doc.text(String(rate), rateX, y, { align: "right" });
+        setText(7.5, dark, "bold");
+        doc.text(String(amount), amountX, y, { align: "right" });
+        y += rowHeight;
+        rule();
+        y += 3;
+      };
+
+      addItem(
+        `Table ${s.table_number ?? ""} · ${gameTypeLabel} session${s.billing_type === "membership" ? " (Membership)" : ""}`,
+        `${hours}h ${minutes}m`,
+        "Session charge",
+        money(tableChargeDisplay),
+      );
+      groupedSnacks.forEach((item) =>
+        addItem(item.name, item.quantity, money(item.price), money(item.subtotal)),
+      );
+
+      const totalRow = (label, value, bold = false) => {
+        ensureSpace(6);
+        setText(bold ? 8 : 7.5, bold ? dark : muted, bold ? "bold" : "normal");
+        doc.text(String(label), itemX, y);
+        setText(bold ? 8 : 7.5, dark, bold ? "bold" : "normal");
+        doc.text(String(value), amountX, y, { align: "right" });
+        y += 6;
+      };
+
+      y += 1;
+      totalRow("Table Charge", money(tableChargeDisplay));
+      if (s.rd_selected) totalRow("R.D. Add-on", money(rdAmount));
+      totalRow("Snacks Total", money(s.snacks_amount));
+      totalRow("Discount", `- ${money(s.discount)}`);
+      totalRow(`Tax (${s.tax_percent || 0}%)`, money(s.tax_amount));
+      y += 1;
+      rule();
+      y += 4;
+
+      if (s.payments?.length) {
+        section("Payment Details");
+        s.payments.forEach((payment) =>
+          totalRow(String(payment.method || "Payment").toUpperCase(), money(payment.amount)),
+        );
+        totalRow("STATUS", "PAID", true);
+      }
+      if (s.payment_notes) totalRow("Payment Note", s.payment_notes);
+      if (s.ended_by_name) totalRow("Processed By", s.ended_by_name);
+
+      ensureSpace(17);
+      y += 2;
+      rule();
+      y += 7;
+      setText(10, dark, "bold");
+      doc.text("GRAND TOTAL", itemX, y);
+      setText(14, green, "bold");
+      doc.text(money(s.grand_total), amountX, y, { align: "right" });
+      y += 10;
+      setText(7, muted);
+      doc.text(
+        `Thank you for playing at ${club}. Rack 'em up again soon.`,
+        pageWidth / 2,
+        y,
+        { align: "center" },
+      );
+
+      // Page number footer.
+      const pageCount = doc.getNumberOfPages();
+      for (let page = 1; page <= pageCount; page += 1) {
+        doc.setPage(page);
+        setText(6.5, [156, 163, 175]);
+        doc.text(
+          `Invoice ${String(s.invoice_no || id)} · Page ${page} of ${pageCount}`,
+          pageWidth / 2,
+          pageHeight - 7,
+          { align: "center" },
+        );
+      }
+
+      doc.save(filename);
+      return true;
     } catch (error) {
       console.error("Invoice PDF generation failed:", error);
       alert("Could not generate the invoice PDF. Please try again.");
+      return false;
     }
   };
 
@@ -197,6 +396,10 @@ export default function Bill() {
 
   return (
     <div className="space-y-6 max-w-3xl mx-auto" data-testid="bill-page">
+      <AutoDownloadInvoice
+        invoiceKey={String(s.invoice_no || id)}
+        onDownload={downloadInvoicePdf}
+      />
       <style>{`
         @page { size: A4 portrait; margin: 4mm; }
         @media print {
@@ -371,6 +574,74 @@ export default function Bill() {
             </div>
           )}
         </div>
+
+        {s.billing_type === "membership" && membershipState && (
+          <div className="py-5 border-b border-[#262626]">
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <div>
+                <div className="text-xs uppercase tracking-[0.2em] text-gray-500 font-bold">
+                  {isPs5Membership ? "PS5 Membership Summary" : "Membership Usage Summary"}
+                </div>
+                <div className="font-semibold mt-1">
+                  {membershipState.member_name || s.customer_name || "Member"}
+                  {membershipState.plan ? ` · ${membershipState.plan}` : ""}
+                </div>
+              </div>
+              <span
+                className={`text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full ${
+                  membershipState.is_expired
+                    ? "bg-red-500/10 text-red-400"
+                    : "bg-green-500/10 text-green-400"
+                }`}
+              >
+                {membershipState.is_expired ? "Expired / Exhausted" : "Active"}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <MembershipMetric
+                label="Played today"
+                value={formatDuration(membershipState.used_seconds_today)}
+              />
+              <MembershipMetric
+                label="Today's time left"
+                value={formatDuration(membershipState.remaining_seconds_today)}
+                accent="green"
+              />
+              <MembershipMetric
+                label="Total membership time left"
+                value={formatDuration(membershipState.remaining_total_seconds)}
+              />
+              <MembershipMetric
+                label="Membership days left"
+                value={membershipDaysLeft === null ? "—" : `${membershipDaysLeft} days`}
+              />
+            </div>
+
+            <div className="mt-4">
+              <div className="flex justify-between text-xs text-gray-400 mb-2">
+                <span>Today's usage</span>
+                <span>
+                  {formatDuration(membershipState.used_seconds_today)} / {membershipState.daily_minutes || 0} min
+                </span>
+              </div>
+              <div className="h-2 rounded-full bg-[#292929] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-green-600"
+                  style={{
+                    width: `${dailyUsagePercent}%`,
+                  }}
+                />
+              </div>
+            </div>
+            <div className="text-xs text-gray-500 mt-3">
+              Daily allowance: {membershipState.daily_minutes || 0} minutes
+              {membershipState.expires_at
+                ? ` · Expires ${new Date(membershipState.expires_at).toLocaleDateString()}`
+                : ""}
+            </div>
+          </div>
+        )}
 
         <div className="py-6 border-b border-[#262626]">
           <table className="w-full text-sm">
@@ -553,4 +824,52 @@ function Row({ label, value }) {
       <span className="font-mono">{value}</span>
     </div>
   );
+}
+
+
+function MembershipMetric({ label, value, accent }) {
+  return (
+    <div className="rounded-xl border border-[#292929] bg-[#101010] p-3">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className={`text-lg font-bold font-mono mt-1 ${accent === "green" ? "text-green-400" : "text-white"}`}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function AutoDownloadInvoice({ invoiceKey, onDownload }) {
+  const started = useRef(false);
+  const downloadRef = useRef(onDownload);
+  downloadRef.current = onDownload;
+
+  useEffect(() => {
+    if (!invoiceKey || started.current) return undefined;
+
+    const storageKey = `invoice-pdf-downloaded:${invoiceKey}`;
+    try {
+      if (window.sessionStorage.getItem(storageKey) === "yes") return undefined;
+    } catch {
+      // Continue with the in-memory guard if sessionStorage is unavailable.
+    }
+
+    const timer = window.setTimeout(async () => {
+      if (started.current) return;
+      started.current = true;
+      const success = await downloadRef.current();
+      if (success) {
+        try {
+          window.sessionStorage.setItem(storageKey, "yes");
+        } catch {
+          // The in-memory guard still prevents duplicate downloads this mount.
+        }
+      } else {
+        started.current = false;
+      }
+    }, 800);
+
+    return () => window.clearTimeout(timer);
+  }, [invoiceKey]);
+
+  return null;
 }
