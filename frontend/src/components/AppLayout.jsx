@@ -23,17 +23,17 @@ import PageSkeleton from "@/components/states/PageSkeleton";
 import { Suspense } from "react";
 
 const navItems = [
-  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", perm: null },
-  { to: "/tables", icon: Grid3x3, label: "Tables", perm: null },
-  { to: "/ps5", icon: Gamepad2, label: "PS5 Management", perm: "manage_sessions" },
-  { to: "/memberships", icon: Users, label: "Membership", perm: "manage_sessions" },
-  { to: "/sessions", icon: Timer, label: "Sessions", perm: "manage_sessions" },
-  { to: "/snacks", icon: UtensilsCrossed, label: "Snacks", perm: null },
-  { to: "/food-orders", icon: ClipboardList, label: "Food Orders", perm: null },
+  { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", perm: "view_dashboard" },
+  { to: "/tables", icon: Grid3x3, label: "Tables", perm: "view_tables" },
+  { to: "/ps5", icon: Gamepad2, label: "PS5 Management", perm: "view_ps5" },
+  { to: "/memberships", icon: Users, label: "Membership", perm: "view_memberships" },
+  { to: "/sessions", icon: Timer, label: "Sessions", perm: "view_sessions" },
+  { to: "/snacks", icon: UtensilsCrossed, label: "Snacks", perm: "view_snacks" },
+  { to: "/food-orders", icon: ClipboardList, label: "Food Orders", perm: "view_food_orders" },
   { to: "/expenses", icon: Wallet, label: "Expenses", perm: "view_expenses" },
   { to: "/reports", icon: BarChart3, label: "Reports", perm: "view_reports" },
   { to: "/staff", icon: Users, label: "Staff", perm: "manage_users" },
-  { to: "/settings", icon: Settings, label: "Settings", perm: "manage_settings" },
+  { to: "/settings", icon: Settings, label: "Settings", perm: "view_settings" },
 ];
 
 export default function AppLayout() {

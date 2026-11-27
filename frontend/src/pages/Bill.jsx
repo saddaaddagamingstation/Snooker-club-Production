@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import api, { inr, inrRounded } from "@/lib/api";
+import api, { inr } from "@/lib/api";
 import {
   Printer,
   Download,
@@ -383,64 +383,21 @@ export default function Bill() {
               </tr>
             </thead>
             <tbody>
-              {/*
-                Timer-based sessions calculate the charge at session level.
-                The backend intentionally stores frame amounts as zero for
-                these sessions, so never show those zero-value frame rows.
-              */}
-              {s.game_timer_enabled ? (
-                <tr className="border-t border-[#262626]">
-                  <td className="py-2.5">
-                    Table {s.table_number} · Game session
-                    {s.billing_type === "membership" ? " (Membership)" : ""}
-                  </td>
-                  <td className="py-2.5 text-right font-mono">
-                    {hours}h {minutes}m
-                  </td>
-                  <td className="py-2.5 text-right font-mono">
-                    Session charge
-                  </td>
-                  <td className="py-2.5 text-right font-mono font-bold">
-                    {inr(tableChargeDisplay)}
-                  </td>
-                </tr>
-              ) : (s.frames || []).length > 0 ? (
-                (s.frames || []).map((f) => (
-                  <tr key={f.id || f.frame_number} className="border-t border-[#262626]">
-                    <td className="py-2.5">
-                      Frame {f.frame_number}
-                      {f.winner && (
-                        <span className="text-gray-500 text-xs">
-                          {" "}
-                          · {f.winner} beat {f.loser}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-2.5 text-right font-mono">
-                      {f.duration_minutes}m
-                    </td>
-                    <td className="py-2.5 text-right font-mono">
-                      {inr(s.rate_used)}/hr
-                    </td>
-                    <td className="py-2.5 text-right font-mono font-bold">
-                      {inr(f.amount || 0)}
-                    </td>
-                  </tr>
-                ))
-              ) : (
-                <tr className="border-t border-[#262626]">
-                  <td className="py-2.5">
-                    Table {s.table_number} · {hours}h {minutes}m
-                  </td>
-                  <td className="py-2.5 text-right font-mono">1</td>
-                  <td className="py-2.5 text-right font-mono">
-                    {inr(s.rate_used)}/hr
-                  </td>
-                  <td className="py-2.5 text-right font-mono font-bold">
-                    {inr(s.table_amount)}
-                  </td>
-                </tr>
-              )}
+              <tr className="border-t border-[#262626]">
+                <td className="py-2.5">
+                  Table {s.table_number} · Game session
+                  {s.billing_type === "membership" ? " (Membership)" : ""}
+                </td>
+                <td className="py-2.5 text-right font-mono">
+                  {hours}h {minutes}m
+                </td>
+                <td className="py-2.5 text-right font-mono">
+                  Session charge
+                </td>
+                <td className="py-2.5 text-right font-mono font-bold">
+                  {inr(tableChargeDisplay)}
+                </td>
+              </tr>
               {groupedSnacks.map((it, i) => (
                 <tr key={`sn-${i}`} className="border-t border-[#262626]">
                   <td className="py-2.5">{it.name}</td>

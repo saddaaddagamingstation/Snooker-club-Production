@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
-import api, { inr, inrRounded, formatApiErrorDetail } from "@/lib/api";
+import api, { inr, formatApiErrorDetail } from "@/lib/api";
 import {
   Clock,
   Plus,
@@ -9,154 +9,10 @@ import {
   Trash2,
   X,
   Receipt,
-  Trophy,
-  Flag,
   RotateCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
-
-function elapsed(startIso) {
-  const ms = Date.now() - new Date(startIso).getTime();
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  return {
-    display: `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`,
-    hours: ms / 3600000,
-  };
-}
-
-function EndFrameModal({ current, onClose, onEnd }) {
-  const [playerA, setPlayerA] = useState("");
-  const [playerB, setPlayerB] = useState("");
-  const [winner, setWinner] = useState("");
-  const [paidBy, setPaidBy] = useState("");
-  const [notes, setNotes] = useState("");
-  const players = [playerA, playerB].filter(Boolean);
-  return (
-    <div
-      className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-sm bg-[#141414] border border-[#262626] rounded-2xl p-5"
-      >
-        <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-          <Trophy className="w-4 h-4 text-amber-400" /> End Frame{" "}
-        </h3>
-        <div className="space-y-3">
-          <div>
-            <div>
-              <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
-                Player A
-              </div>
-
-              <input
-                value={playerA}
-                onChange={(e) => setPlayerA(e.target.value)}
-                placeholder="Player A"
-                className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-amber-500"
-              />
-            </div>
-
-            <div>
-              <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
-                Player B
-              </div>
-
-              <input
-                value={playerB}
-                onChange={(e) => setPlayerB(e.target.value)}
-                placeholder="Player B"
-                className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-amber-500"
-              />
-            </div>
-            <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
-              Winner
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {players.map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => setWinner(p)}
-                  data-testid={`winner-${p}`}
-                  className={`h-11 rounded-lg font-semibold text-sm border ${winner === p ? "bg-green-700 border-green-700 text-white" : "bg-[#0f0f0f] border-[#262626] text-gray-300 hover:border-green-700/40"}`}
-                >
-                  {p || "—"}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
-              Who Pays?
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {players.map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => setPaidBy(p)}
-                  data-testid={`paid-${p}`}
-                  className={`h-11 rounded-lg font-semibold text-sm border ${paidBy === p ? "bg-amber-600 border-amber-600 text-white" : "bg-[#0f0f0f] border-[#262626] text-gray-300 hover:border-amber-500/40"}`}
-                >
-                  {p || "—"}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <div className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1.5">
-              Notes
-            </div>
-            <input
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              className="w-full h-11 px-3 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white focus:outline-none focus:border-amber-500"
-            />
-          </div>
-          <div className="flex gap-3 pt-2">
-            <button
-              type="button"
-              onClick={() => {
-                setWinner("");
-                setPaidBy("");
-                setPlayerA("");
-                setPlayerB("");
-                setNotes("");
-                onClose();
-              }}
-              className="w-28 h-11 rounded-xl border border-[#303030] bg-[#1a1a1a] hover:bg-[#222] text-gray-300 font-semibold"
-            >
-              Cancel
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                onEnd(
-                  playerA.trim(),
-                  playerB.trim(),
-                  winner || "",
-                  paidBy || "",
-                  notes.trim(),
-                );
-              }}
-              className="flex-1 h-11 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center justify-center gap-2"
-            >
-              <RotateCw className="w-4 h-4" />
-              End Frame
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function countdownColor(session) {
   if (!session) return null;
@@ -185,7 +41,7 @@ function countdownColor(session) {
 }
 
 
-export default function Sessions() {
+export default function Sessions({ gameType = null } = {}) {
   const [sessions, setSessions] = useState([]);
   const { can } = useAuth();
   const [snacks, setSnacks] = useState([]);
@@ -194,15 +50,12 @@ export default function Sessions() {
   const [endModal, setEndModal] = useState(null); // session
   const [billingSessionId, setBillingSessionId] = useState(null); //currently in billing mode
   const [billingResumeSessionId, setBillingResumeSessionId] = useState(null);
-  const [pendingFrame, setPendingFrame] = useState(null);
-  const [billingMode, setBillingMode] = useState(false);
-  const [frameModalSession, setFrameModalSession] = useState(null);
-  const [frameEndPausedSessionId, setFrameEndPausedSessionId] = useState(null);
   const [clearSessionTarget, setClearSessionTarget] = useState(null);
   const [exhaustionTarget, setExhaustionTarget] = useState(null);
   const [timerPromptTarget, setTimerPromptTarget] = useState(null);
   const dismissedExhaustionIdRef = useRef(null);
   const dismissedTimerPromptIdRef = useRef(null);
+  const notifiedTimerPromptIdRef = useRef(null);
   const navigate = useNavigate();
 
   const load = async () => {
@@ -212,14 +65,40 @@ export default function Sessions() {
     ]);
     setSessions(s.data);
     setSnacks(sn.data);
-    const pendingTimerPrompts = (s.data || []).filter((x) => x.game_timer_enabled && x.timer_mode === "awaiting_decision");
+    const scopedSessions = gameType
+      ? (s.data || []).filter((x) => String(x.game_type || "").toLowerCase() === String(gameType).toLowerCase())
+      : (s.data || []);
+    const pendingTimerPrompts = can("manage_sessions")
+      ? scopedSessions.filter((x) => x.game_timer_enabled && x.timer_mode === "awaiting_decision")
+      : [];
     if (pendingTimerPrompts.length === 0) dismissedTimerPromptIdRef.current = null;
     const timerPrompt = pendingTimerPrompts.find((x) => x.id !== dismissedTimerPromptIdRef.current);
     setTimerPromptTarget(timerPrompt || null);
-    const exhausted = (s.data || []).find((x) => x.membership_exhausted && x.id !== dismissedExhaustionIdRef.current);
+    if (timerPrompt && notifiedTimerPromptIdRef.current !== timerPrompt.id) {
+      notifiedTimerPromptIdRef.current = timerPrompt.id;
+      toast.info(`Game time finished · Table ${timerPrompt.table_number}`, {
+        description: `${timerPrompt.table?.table_name || "Table"} · ${(timerPrompt.game_type || "snooker").replaceAll("_", " ")}`,
+        duration: 10000,
+        action: {
+          label: "Open Sessions",
+          onClick: () => navigate("/sessions"),
+        },
+      });
+    }
+    if (!timerPrompt) notifiedTimerPromptIdRef.current = null;
+    const exhausted = can("manage_sessions")
+      ? scopedSessions.find((x) => x.membership_exhausted && x.id !== dismissedExhaustionIdRef.current)
+      : null;
     if (exhausted) setExhaustionTarget(exhausted);
     else setExhaustionTarget(null);
   };
+  const visibleSessions = useMemo(
+    () => gameType
+      ? sessions.filter((session) => String(session.game_type || "").toLowerCase() === String(gameType).toLowerCase())
+      : sessions,
+    [sessions, gameType],
+  );
+
   useEffect(() => {
     load();
     const t1 = setInterval(load, 5000);
@@ -259,13 +138,6 @@ export default function Sessions() {
 
   const handlePauseResume = async (session) => {
     try {
-      // A frame must be active before using the normal
-      // Pause / Resume control.
-      if (!session.current_frame && !session.game_timer_enabled) {
-        toast.error("Please start a frame first.");
-        return;
-      }
-
       if (session.is_paused) {
         await api.post(`/sessions/${session.id}/resume`);
         toast.success("Session resumed");
@@ -327,10 +199,8 @@ export default function Sessions() {
 
   const openEndModal = async (session) => {
     try {
-      // Remember whether BILLING caused the pause.
-      // If the session was already paused because the frame ended
-      // or because the user manually paused it, we must NOT resume
-      // it when billing is cancelled.
+      // Pause only if billing opened a running session. If it was
+      // already paused manually, preserve that state when billing is cancelled.
       const billingCausedPause = !session.is_paused;
 
       if (billingCausedPause) {
@@ -347,23 +217,12 @@ export default function Sessions() {
         throw new Error("Session not found");
       }
 
-      // Remember whether this billing modal is responsible
-      // for pausing the session.
       setBillingResumeSessionId(billingCausedPause ? session.id : null);
 
-      // Preserve the current frame's existing information.
-      // We are NOT ending the frame here.
-      const currentFrame = refreshed.current_frame || {};
-
+      // Preview the whole session at session level.
       const { data } = await api.post(
         `/sessions/${session.id}/finalize-preview`,
-        {
-          player_a: currentFrame.player_a || "",
-          player_b: currentFrame.player_b || "",
-          winner: currentFrame.winner || "",
-          paid_by: currentFrame.paid_by || "",
-          notes: currentFrame.notes || "",
-        },
+        {},
       );
 
       setBillingSessionId(session.id);
@@ -408,44 +267,6 @@ export default function Sessions() {
     }
   };
 
-  const startFrame = async (sessionId) => {
-    try {
-      await api.post(`/sessions/${sessionId}/frames/start`, {
-        player_a: "",
-        player_b: "",
-      });
-
-      toast.success("Frame started");
-      await load();
-    } catch (e) {
-      toast.error(formatApiErrorDetail(e.response?.data?.detail));
-    }
-  };
-  const endFrame = async (
-    sessionId,
-    playerA,
-    playerB,
-    winner,
-    paidBy,
-    notes,
-  ) => {
-    try {
-      await api.post(`/sessions/${sessionId}/frames/end`, {
-        player_a: playerA,
-        player_b: playerB,
-        winner,
-        paid_by: paidBy,
-        notes: notes || "",
-      });
-
-      toast.success("Frame recorded");
-
-      await load();
-    } catch (e) {
-      toast.error(formatApiErrorDetail(e.response?.data?.detail));
-      throw e;
-    }
-  };
 
   return (
     <div className="space-y-6" data-testid="sessions-page">
@@ -454,15 +275,15 @@ export default function Sessions() {
           Live Floor
         </div>
         <h1 className="text-3xl sm:text-4xl font-bold tracking-tight">
-          Active Sessions
+          {gameType === "ps5" ? "PS5 Live Sessions" : "Active Sessions"}
         </h1>
         <p className="text-gray-400 mt-2 text-sm">
-          {sessions.length} session{sessions.length !== 1 && "s"} running right
+          {visibleSessions.length} session{visibleSessions.length !== 1 && "s"} running right
           now.
         </p>
       </div>
 
-      {sessions.length === 0 && (
+      {visibleSessions.length === 0 && (
         <div className="bg-[#141414] border border-dashed border-[#262626] rounded-2xl p-12 text-center">
           <Clock className="w-10 h-10 mx-auto text-gray-600" />
           <p className="text-gray-400 mt-4">
@@ -479,11 +300,11 @@ export default function Sessions() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {sessions.map((s) => {
+        {visibleSessions.map((s) => {
           const e = computeBill(
+            s.start_time,
             s.rate_used,
-            s.frames || [],
-            s.current_frame,
+            s.paused_seconds,
             s.is_paused,
             s.pause_started_at,
           );
@@ -507,7 +328,7 @@ export default function Sessions() {
             <div
               key={s.id}
               data-testid={`active-session-${s.table_number}`}
-              className={`bg-[#141414] border ${timerColor?.border || "border-amber-500/30"} rounded-2xl overflow-hidden ${timerColor?.shadow || "shadow-[0_0_30px_rgba(245,158,11,0.05)]"}`}
+              className={`relative bg-[#141414] border ${timerColor?.border || "border-amber-500/30"} rounded-2xl overflow-hidden ${timerColor?.shadow || "shadow-[0_0_30px_rgba(245,158,11,0.05)]"}`}
             >
               <div className={`p-6 border-b border-[#262626] flex items-center justify-between gap-4 flex-wrap bg-gradient-to-r ${timerColor?.header || "from-amber-500/5"} to-transparent`}>
                 <div>
@@ -553,48 +374,7 @@ export default function Sessions() {
                 <Stat label="Snacks" value={inr(snacksAmount)} />
                 <Stat label="Est. Bill" value={inr(bill)} accent="green" />
               </div>
-              <div className="px-6 pb-4">
-                <FramesSection
-                  session={s}
-                  onOpenEndFrame={async (session, isBilling) => {
-                    try {
-                      setBillingMode(isBilling);
 
-                      // End Frame must freeze the session/frame immediately
-                      // while the End Frame popup is open.
-                      if (
-                        !isBilling &&
-                        session.current_frame &&
-                        !session.is_paused
-                      ) {
-                        await api.post(
-                          `/sessions/${session.id}/pause?reason=FRAME_END`,
-                        );
-
-                        setFrameEndPausedSessionId(session.id);
-                      }
-
-                      // Reload so the UI receives the frozen state
-                      await load();
-
-                      const refreshed = (
-                        await api.get("/sessions/active")
-                      ).data.find((x) => x.id === session.id);
-
-                      if (!refreshed) {
-                        throw new Error("Session not found");
-                      }
-
-                      setFrameModalSession(refreshed);
-                    } catch (e) {
-                      toast.error(
-                        formatApiErrorDetail(e.response?.data?.detail),
-                      );
-                    }
-                  }}
-                  onStartFrame={(session) => startFrame(session.id)}
-                />
-              </div>
               <div className="px-6 pb-4">
                 <div className="text-xs uppercase tracking-wider text-gray-500 font-bold mb-2">
                   Snacks ({s.snacks?.length || 0})
@@ -616,45 +396,64 @@ export default function Sessions() {
                       </span>
                       <div className="flex items-center gap-3">
                         <span className="font-mono">{inr(it.subtotal)}</span>
-                        <button
-                          onClick={() => removeSnack(s.id, i)}
-                          className="text-gray-500 hover:text-red-400"
-                          data-testid={`remove-snack-${i}`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {can("manage_sessions") && (
+                          <button
+                            onClick={() => removeSnack(s.id, i)}
+                            className="text-gray-500 hover:text-red-400"
+                            data-testid={`remove-snack-${i}`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
               <div className="p-6 pt-2 flex gap-3">
-                <button
-                  onClick={() => setAddSnack(s)}
-                  data-testid={`add-snack-${s.table_number}`}
-                  className="flex-1 h-11 rounded-xl bg-[#1c1c1c] hover:bg-[#262626] border border-[#262626] text-white font-semibold flex items-center justify-center gap-2"
-                >
-                  <Plus className="w-4 h-4" />
-                  Add Snack
-                </button>
+                {can("manage_sessions") && <>
+                  <button
+                    onClick={() => setAddSnack(s)}
+                    data-testid={`add-snack-${s.table_number}`}
+                    className="flex-1 h-11 rounded-xl bg-[#1c1c1c] hover:bg-[#262626] border border-[#262626] text-white font-semibold flex items-center justify-center gap-2"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Snack
+                  </button>
 
-                <button
-                  onClick={() => handlePauseResume(s)}
-                  data-testid={`pause-session-${s.table_number}`}
-                  className="flex-1 h-11 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/40 text-amber-300 font-semibold flex items-center justify-center gap-2"
-                >
-                  {s.is_paused ? (
-                    <>
-                      <RotateCw className="w-4 h-4" />
-                      Resume
-                    </>
-                  ) : (
-                    <>
-                      <Pause className="w-4 h-4" />
-                      {s.game_timer_enabled || s.current_frame ? "Pause" : "Start Frame First"}
-                    </>
-                  )}
-                </button>
+                  <button
+                    onClick={() => handlePauseResume(s)}
+                    data-testid={`pause-session-${s.table_number}`}
+                    className="flex-1 h-11 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/40 text-amber-300 font-semibold flex items-center justify-center gap-2"
+                  >
+                    {s.is_paused ? (
+                      <>
+                        <RotateCw className="w-4 h-4" />
+                        Resume
+                      </>
+                    ) : (
+                      <>
+                        <Pause className="w-4 h-4" />
+                        Pause
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={async () => {
+                      try {
+                        await openEndModal(s);
+                      } catch (e) {
+                        toast.error(formatApiErrorDetail(e.response?.data?.detail));
+                      }
+                    }}
+                    data-testid={`end-session-${s.table_number}`}
+                    className="flex-1 h-11 rounded-xl bg-red-900/40 hover:bg-red-900/60 border border-red-800 text-red-100 font-semibold flex items-center justify-center gap-2"
+                  >
+                    <Square className="w-4 h-4" />
+                    End & Bill
+                  </button>
+                </>}
 
                 {can("clear_session") && (
                   <button
@@ -666,58 +465,57 @@ export default function Sessions() {
                     Clear
                   </button>
                 )}
-
-                <button
-                  onClick={async () => {
-                    try {
-                      await openEndModal(s);
-                    } catch (e) {
-                      toast.error(
-                        formatApiErrorDetail(e.response?.data?.detail),
-                      );
-                    }
-                  }}
-                  data-testid={`end-session-${s.table_number}`}
-                  className="flex-1 h-11 rounded-xl bg-red-900/40 hover:bg-red-900/60 border border-red-800 text-red-100 font-semibold flex items-center justify-center gap-2"
-                >
-                  <Square className="w-4 h-4" />
-                  End & Bill
-                </button>
               </div>
+              {can("manage_sessions") && timerPromptTarget?.id === s.id && (
+                <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/45 backdrop-blur-md p-4 sm:p-6">
+                  <div className="w-full max-w-md rounded-2xl border border-amber-500/50 bg-[#111111]/95 p-5 sm:p-6 space-y-4 shadow-[0_18px_60px_rgba(0,0,0,0.75)]">
+                    <div className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-amber-400 font-bold">
+                      <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+                      Game time completed
+                    </div>
+                    <h3 className="text-xl font-bold">Continue playing?</h3>
+                    <div className="grid grid-cols-3 gap-2 rounded-xl border border-[#303030] bg-[#191919] p-3">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-gray-500">Table No.</div>
+                        <div className="font-semibold text-white">{s.table_number}</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-gray-500">Table Name</div>
+                        <div className="font-semibold text-white truncate">{s.table?.table_name || `Table ${s.table_number}`}</div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-gray-500">Game</div>
+                        <div className="font-semibold text-white capitalize">{(s.game_type || "snooker").replaceAll("_", " ")}</div>
+                      </div>
+                    </div>
+                    <p className="text-sm text-gray-300">
+                      Selected time has ended. The completed block is frozen. Renew the timer or stop and generate the bill.
+                    </p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button onClick={() => extendTimer(s, 30)} className="h-11 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold">Add 30 min</button>
+                      <button onClick={() => extendTimer(s, 60)} className="h-11 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold">Add 60 min</button>
+                    </div>
+                    {["snooker", "mini_snooker"].includes(s.game_type) && (
+                      <button onClick={() => continueTimer(s)} className="w-full h-11 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-200 font-semibold">
+                        Continue normally · ₹5/min
+                      </button>
+                    )}
+                    <button onClick={() => endExpiredTimer(s)} className="w-full h-11 rounded-xl bg-red-900/50 hover:bg-red-900/70 border border-red-800 text-red-100 font-semibold">
+                      Stop and generate bill
+                    </button>
+                    <button onClick={() => navigate("/sessions")} className="w-full h-10 rounded-xl border border-[#3a3a3a] bg-[#202020] hover:bg-[#292929] text-gray-200 font-semibold">
+                      Go to Sessions
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
       </div>
 
-      {timerPromptTarget && (
-        <div className="fixed top-24 right-6 z-[75] w-[min(100%-2rem,28rem)] pointer-events-none sm:right-6 sm:top-24">
-          <div className="w-full rounded-2xl border border-amber-500/40 bg-[#141414] p-5 sm:p-6 space-y-4 shadow-[0_18px_60px_rgba(0,0,0,0.65)] pointer-events-auto">
-            <div className="text-xs uppercase tracking-[0.2em] text-amber-400 font-bold">Timer completed</div>
-            <h3 className="text-xl font-bold">Table {timerPromptTarget.table_number} · Continue playing?</h3>
-            <p className="text-sm text-gray-300">
-              The selected time has ended. Billing for this block is frozen. Ask the customer whether they want to stop or continue.
-            </p>
-            <div className="grid grid-cols-2 gap-3">
-              <button onClick={() => extendTimer(timerPromptTarget, 30)} className="h-11 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold">
-                Add 30 min
-              </button>
-              <button onClick={() => extendTimer(timerPromptTarget, 60)} className="h-11 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold">
-                Add 60 min
-              </button>
-            </div>
-            {timerPromptTarget.game_type !== "pool" && (
-              <button onClick={() => continueTimer(timerPromptTarget)} className="w-full h-11 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-200 font-semibold">
-                Continue normally · ₹5/min
-              </button>
-            )}
-            <button onClick={() => endExpiredTimer(timerPromptTarget)} className="w-full h-11 rounded-xl bg-red-900/50 hover:bg-red-900/70 border border-red-800 text-red-100 font-semibold">
-              Stop and generate bill
-            </button>
-          </div>
-        </div>
-      )}
 
-      {exhaustionTarget && (
+      {can("manage_sessions") && exhaustionTarget && (
         <div className="fixed inset-0 z-[70] bg-black/80 flex items-center justify-center p-4">
           <div className="w-full max-w-md rounded-2xl border border-amber-500/40 bg-[#141414] p-6 space-y-4">
             <h3 className="text-xl font-bold text-amber-300">Daily membership time finished</h3>
@@ -755,7 +553,7 @@ export default function Sessions() {
         </div>
       )}
 
-      {addSnack && (
+      {can("manage_sessions") && addSnack && (
         <Modal
           title={`Add snack · Table ${addSnack.table_number}`}
           onClose={() => setAddSnack(null)}
@@ -767,76 +565,6 @@ export default function Sessions() {
             }
           />
         </Modal>
-      )}
-
-      {frameModalSession && (
-        <EndFrameModal
-          current={frameModalSession.current_frame}
-          onClose={async () => {
-            try {
-              // Resume if End Frame temporarily paused the session
-              if (
-                frameEndPausedSessionId &&
-                frameEndPausedSessionId === frameModalSession?.id
-              ) {
-                await api.post(`/sessions/${frameEndPausedSessionId}/resume`);
-              }
-
-              // Resume if billing itself caused the pause
-              if (
-                billingResumeSessionId &&
-                billingResumeSessionId === frameModalSession?.id
-              ) {
-                await api.post(`/sessions/${billingResumeSessionId}/resume`);
-              }
-            } catch (e) {
-              console.error(e);
-            }
-
-            setFrameEndPausedSessionId(null);
-            setBillingResumeSessionId(null);
-            setFrameModalSession(null);
-            setBillingMode(false);
-
-            await load();
-          }}
-          onEnd={async (playerA, playerB, winner, paidBy, notes) => {
-            // Normal End Frame
-            if (!billingMode) {
-              await endFrame(
-                frameModalSession.id,
-                playerA,
-                playerB,
-                winner,
-                paidBy,
-                notes,
-              );
-
-              setFrameEndPausedSessionId(null);
-              setFrameModalSession(null);
-              setBillingMode(false);
-
-              return;
-            }
-
-            // End & Bill flow
-            const session = frameModalSession;
-
-            const frameData = {
-              playerA,
-              playerB,
-              winner,
-              paidBy,
-              notes,
-            };
-
-            setPendingFrame(frameData);
-
-            await openEndModal(session, true, frameData);
-
-            setFrameModalSession(null);
-          }}
-        />
       )}
 
       {clearSessionTarget && (
@@ -918,132 +646,6 @@ export default function Sessions() {
             }
           />
         </Modal>
-      )}
-    </div>
-  );
-}
-
-function FramesSection({ session, onOpenEndFrame, onStartFrame }) {
-  const [endOpen, setEndOpen] = useState(false);
-  useEffect(() => {
-    const handler = (e) => {
-      if (e.detail.sessionId === session.id) {
-        setEndOpen(true);
-      }
-    };
-
-    document.addEventListener("open-end-frame", handler);
-
-    return () => {
-      document.removeEventListener("open-end-frame", handler);
-    };
-  }, [session.id]);
-  const frames = session.frames || [];
-  const current = session.current_frame;
-
-  // Stats
-  const wins = {};
-  const losses = {};
-  const paid = {};
-  for (const f of frames) {
-    if (f.winner) wins[f.winner] = (wins[f.winner] || 0) + 1;
-    if (f.loser) losses[f.loser] = (losses[f.loser] || 0) + 1;
-    if (f.paid_by) paid[f.paid_by] = (paid[f.paid_by] || 0) + 1;
-  }
-  const players = Array.from(
-    new Set(
-      [
-        ...Object.keys(wins),
-        ...Object.keys(losses),
-        current?.player_a,
-        current?.player_b,
-      ].filter(Boolean),
-    ),
-  );
-
-  return (
-    <div className="mt-2 p-4 rounded-xl bg-[#0d0d0d] border border-[#262626]">
-      <div className="flex items-center justify-between mb-3">
-        <div className="text-xs uppercase tracking-wider text-gray-500 font-bold flex items-center gap-2">
-          <Trophy className="w-3.5 h-3.5 text-amber-400" /> Frames ·{" "}
-          {frames.length} played
-        </div>
-
-        {current ? (
-          <button
-            onClick={() => onOpenEndFrame(session, false)}
-            data-testid={`end-frame-${session.table_number}`}
-            className="text-xs h-8 px-3 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold flex items-center gap-1"
-          >
-            <Trophy className="w-3 h-3" />
-            End Frame
-          </button>
-        ) : (
-          <button
-            onClick={() => onStartFrame(session)}
-            data-testid={`start-frame-${session.table_number}`}
-            className="text-xs h-8 px-3 rounded-lg bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-1"
-          >
-            <Flag className="w-3 h-3" />
-            Start Frame
-          </button>
-        )}
-      </div>
-
-      {current && (
-        <div className="p-3 rounded-lg bg-amber-500/5 border border-amber-500/20 mb-3">
-          <div className="text-xs text-amber-300 font-bold uppercase tracking-wider">
-            Frame {current.frame_number} · running
-          </div>
-          <div className="text-sm mt-1 text-gray-300">
-            {current.player_a || "Player A"}{" "}
-            <span className="text-gray-500 mx-2">vs</span>{" "}
-            {current.player_b || "Player B"}
-          </div>
-        </div>
-      )}
-
-      {frames.length > 0 && (
-        <div className="space-y-1.5 max-h-40 overflow-y-auto text-xs">
-          {frames
-            .slice()
-            .reverse()
-            .map((f) => (
-              <div
-                key={f.id}
-                className="flex items-center justify-between p-2 rounded-lg bg-[#141414] border border-[#1c1c1c]"
-              >
-                <span className="font-mono text-gray-500 w-8">
-                  #{f.frame_number}
-                </span>
-                <span className="flex-1 text-gray-300 truncate">
-                  <Trophy className="w-3 h-3 inline text-amber-400 mr-1" />
-                  <b>{f.winner}</b> beat {f.loser}
-                </span>
-                <span className="text-gray-600 font-mono mr-2">
-                  {f.duration_minutes}m
-                </span>
-                <span className="font-bold text-green-400 font-mono">
-                  {inr(f.amount || 0)}
-                </span>
-              </div>
-            ))}
-        </div>
-      )}
-
-      {players.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {players.map((p) => (
-            <span
-              key={p}
-              className="text-[10px] px-2 py-1 rounded-full bg-[#141414] border border-[#262626]"
-            >
-              {p} · <span className="text-green-400">W{wins[p] || 0}</span> ·{" "}
-              <span className="text-red-400">L{losses[p] || 0}</span> ·{" "}
-              <span className="text-amber-400">Paid {paid[p] || 0}</span>
-            </span>
-          ))}
-        </div>
       )}
     </div>
   );
@@ -1204,73 +806,32 @@ function formatGameTimer(session) {
 }
 
 function computeBill(
+  startIso,
   rate,
-  frames = [],
-  currentFrame = null,
+  pausedSeconds = 0,
   isPaused = false,
   pauseStartedAt = null,
 ) {
   const now = Date.now();
+  const start = startIso ? new Date(startIso).getTime() : now;
+  let seconds = Math.max(0, (now - start) / 1000 - Number(pausedSeconds || 0));
 
-  // Calculate exact time from completed frames
-  let seconds = frames.reduce((total, frame) => {
-    if (!frame.start_time || !frame.end_time) {
-      return total;
-    }
-
-    const start = new Date(frame.start_time).getTime();
-    const end = new Date(frame.end_time).getTime();
-
-    const frameSeconds = Math.max(
-      0,
-      (end - start) / 1000 - Number(frame.paused_seconds || 0),
-    );
-
-    return total + frameSeconds;
-  }, 0);
-
-  // Add only the currently running frame
-  if (currentFrame?.start_time) {
-    const frameStart = new Date(currentFrame.start_time).getTime();
-
-    let currentFrameSeconds = Math.max(0, (now - frameStart) / 1000);
-
-    // Subtract pauses during this frame
-    currentFrameSeconds -= Number(currentFrame.paused_seconds || 0);
-
-    // If currently paused, stop at pause time
-    if (isPaused && pauseStartedAt) {
-      currentFrameSeconds -= Math.max(
-        0,
-        (now - new Date(pauseStartedAt).getTime()) / 1000,
-      );
-    }
-
-    seconds += Math.max(0, currentFrameSeconds);
+  if (isPaused && pauseStartedAt) {
+    seconds -= Math.max(0, (now - new Date(pauseStartedAt).getTime()) / 1000);
   }
 
-  seconds = Math.floor(seconds);
-
+  seconds = Math.max(0, Math.floor(seconds));
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-
+  const sec = seconds % 60;
   const display =
     `${String(h).padStart(2, "0")}:` +
     `${String(m).padStart(2, "0")}:` +
-    `${String(s).padStart(2, "0")}`;
-
+    `${String(sec).padStart(2, "0")}`;
   const hoursPrecise = seconds / 3600;
+  const tableAmount = Math.round(hoursPrecise * Number(rate || 0) * 100) / 100;
 
-  const tableAmount = Math.round(hoursPrecise * rate * 100) / 100;
-
-  return {
-    seconds,
-    minutes: Math.floor(seconds / 60),
-    hoursPrecise,
-    display,
-    tableAmount,
-  };
+  return { seconds, minutes: Math.floor(seconds / 60), hoursPrecise, display, tableAmount };
 }
 
 function EndForm({ session, snapshot, onSubmit }) {
@@ -1318,10 +879,6 @@ function EndForm({ session, snapshot, onSubmit }) {
 
   const balanced = Math.abs(remaining) < 0.01;
 
-  const previewFrames = session.preview_frame
-    ? [...(session.frames || []), session.preview_frame]
-    : session.frames || [];
-
   const submit = () => {
     let payments;
     if (split) {
@@ -1342,25 +899,7 @@ function EndForm({ session, snapshot, onSubmit }) {
     <div className="flex flex-col min-h-0 flex-1" data-testid="end-form-frozen">
       {/* Scrollable body */}
       <div className="px-5 py-5 pr-7 space-y-4 overflow-y-auto flex-1">
-        {!session.game_timer_enabled && previewFrames.length > 0 && (
-          <div className="p-3 rounded-xl bg-[#0f0f0f] border border-[#262626]">
-            <div className="text-[10px] uppercase tracking-wider text-gray-500 font-bold mb-2">
-              Frame Breakdown
-            </div>
-            <div className="space-y-1 max-h-32 overflow-y-auto text-xs">
-              {previewFrames.map((f) => (
-                <div key={f.id} className="flex items-center justify-between">
-                  <span className="text-gray-400">
-                    Frame {f.frame_number} · {f.duration_minutes}m
-                  </span>
-                  <span className="font-bold font-mono text-white">
-                    {inr(f.amount || 0)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+
         <div className="grid grid-cols-2 gap-3">
           <Stat label="Duration" value={frozenDisplay} />
           <Stat label="Table" value={inr(tableAmount)} />

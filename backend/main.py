@@ -452,18 +452,6 @@ class SessionEnd(BaseModel):
     freeze_snapshot: Optional[FreezeSnapshot] = None
 
 
-class FrameEnd(BaseModel):
-    player_a: Optional[str] = ""
-    player_b: Optional[str] = ""
-    winner: Optional[str] = ""
-    paid_by: Optional[str] = ""
-    notes: Optional[str] = ""
-
-
-class FrameStart(BaseModel):
-    player_a: Optional[str] = ""
-    player_b: Optional[str] = ""
-
 # ---- Expense Categories ----
 
 DEFAULT_EXPENSE_CATEGORIES = [
@@ -788,24 +776,56 @@ def require_admin(user=Depends(get_current_user)):
 
 # Default staff permissions
 DEFAULT_STAFF_PERMISSIONS = {
+    # Read-only access is enabled by default. Every write/manage permission is opt-in.
+    "view_dashboard": True,
+    "view_tables": True,
     "manage_tables": False,
+    "view_ps5": True,
+    "manage_ps5": False,
+    "view_memberships": True,
+    "manage_memberships": False,
+    "view_sessions": True,
+    "manage_sessions": False,
+    "clear_session": False,
+    "view_snacks": True,
     "manage_snacks": False,
-    "manage_sessions": True,
-    "clear_session": False,  #New
+    "view_food_orders": True,
+    "manage_food_orders": False,
+    "view_expenses": True,
     "manage_expenses": False,
-    "view_expenses": False,
-    "view_revenue": False,
-    "view_profit": False,
-    "view_reports": False,
+    "view_revenue": True,
+    "view_profit": True,
+    "view_reports": True,
+    "view_settings": True,
     "manage_users": False,
     "manage_settings": False,
 }
 ALL_PERMISSIONS = list(DEFAULT_STAFF_PERMISSIONS.keys())
 
+# A manage permission automatically grants its matching view permission.
+MANAGE_TO_VIEW = {
+    "manage_tables": "view_tables",
+    "manage_ps5": "view_ps5",
+    "manage_memberships": "view_memberships",
+    "manage_sessions": "view_sessions",
+    "manage_snacks": "view_snacks",
+    "manage_food_orders": "view_food_orders",
+    "manage_expenses": "view_expenses",
+    "manage_settings": "view_settings",
+}
+
+def normalize_permissions(raw):
+    raw = raw or {}
+    return {key: bool(raw.get(key, DEFAULT_STAFF_PERMISSIONS[key])) for key in ALL_PERMISSIONS}
+
 def has_permission(user: dict, perm: str) -> bool:
     if user.get("role") == "admin":
         return True
-    return bool((user.get("permissions") or {}).get(perm, False))
+    permissions = user.get("permissions") or {}
+    if permissions.get(perm, False):
+        return True
+    return any(view_perm == perm and permissions.get(manage_perm, False)
+               for manage_perm, view_perm in MANAGE_TO_VIEW.items())
 
 def require_permission(perm: str):
     def _dep(user=Depends(get_current_user)):
@@ -816,11 +836,11 @@ def require_permission(perm: str):
 
 # ---- Game pricing settings (admin only) ----
 @api.get("/settings/game-pricing")
-async def get_game_pricing(user=Depends(get_current_user)):
+async def get_game_pricing(user=Depends(require_permission("view_settings"))):
     return await _get_game_pricing()
 
 @api.put("/settings/game-pricing")
-async def update_game_pricing(body: GamePricingUpdate, user=Depends(require_admin)):
+async def update_game_pricing(body: GamePricingUpdate, user=Depends(require_permission("manage_settings"))):
     p = body.pricing or {}
     try:
         for game in ("snooker", "mini_snooker"):
@@ -855,7 +875,7 @@ async def login(req: LoginReq):
         "access_token": token,
         "user": {
             "id": user["id"], "email": user["email"], "name": user["name"], "role": user["role"],
-            "permissions": user.get("permissions") or (DEFAULT_STAFF_PERMISSIONS.copy() if user["role"] != "admin" else {p: True for p in ALL_PERMISSIONS}),
+            "permissions": ({p: True for p in ALL_PERMISSIONS} if user["role"] == "admin" else normalize_permissions(user.get("permissions"))),
         },
     }
 
@@ -863,8 +883,8 @@ async def login(req: LoginReq):
 async def me(user=Depends(get_current_user)):
     if user.get("role") == "admin":
         user["permissions"] = {p: True for p in ALL_PERMISSIONS}
-    elif not user.get("permissions"):
-        user["permissions"] = DEFAULT_STAFF_PERMISSIONS.copy()
+    else:
+        user["permissions"] = normalize_permissions(user.get("permissions"))
     return user
 
 @api.post("/auth/logout")
@@ -929,7 +949,7 @@ async def create_user(body: UserIn, user=Depends(require_admin)):
         raise HTTPException(status_code=400, detail="Email already exists")
     perms = body.permissions if body.permissions is not None else DEFAULT_STAFF_PERMISSIONS.copy()
     # normalize keys
-    perms = {k: bool(perms.get(k, False)) for k in ALL_PERMISSIONS}
+    perms = normalize_permissions(perms)
     new_user = {
         "id": str(uuid.uuid4()),
         "name": body.name,
@@ -947,12 +967,13 @@ async def update_permissions(user_id: str, body: PermissionsUpdate, user=Depends
     target = await db.users.find_one({"id": user_id}, {"_id": 0})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    perms = {k: bool(body.permissions.get(k, False)) for k in ALL_PERMISSIONS}
+    perms = normalize_permissions(body.permissions)
     print("=" * 50)
     print("UPDATING USER:", user_id)
     print("NEW PERMISSIONS:", perms)
     print("=" * 50)
     await db.users.update_one({"id": user_id}, {"$set": {"permissions": perms}})
+    USER_CACHE.pop(user_id, None)
     target["permissions"] = perms
     target.pop("password_hash", None)
     return target
@@ -1019,7 +1040,7 @@ async def _ps5_mark_no_shows(now=None):
 
 
 @api.get("/ps5-bookings")
-async def list_ps5_bookings(user=Depends(require_permission("manage_sessions"))):
+async def list_ps5_bookings(user=Depends(require_permission("view_ps5"))):
     now = now_utc()
     await _ps5_mark_no_shows(now)
     rows = await db.ps5_bookings.find(
@@ -1033,7 +1054,7 @@ async def list_ps5_bookings(user=Depends(require_permission("manage_sessions")))
 
 
 @api.post("/ps5-bookings")
-async def create_ps5_booking(body: PS5BookingCreate, user=Depends(require_permission("manage_sessions"))):
+async def create_ps5_booking(body: PS5BookingCreate, user=Depends(require_permission("manage_ps5"))):
     customer_name = body.customer_name.strip()
     if not customer_name:
         raise HTTPException(status_code=400, detail="Customer name is required")
@@ -1123,7 +1144,7 @@ async def create_ps5_booking(body: PS5BookingCreate, user=Depends(require_permis
 
 
 @api.post("/ps5-bookings/{booking_id}/cancel")
-async def cancel_ps5_booking(booking_id: str, user=Depends(require_permission("manage_sessions"))):
+async def cancel_ps5_booking(booking_id: str, user=Depends(require_permission("manage_ps5"))):
     booking = await db.ps5_bookings.find_one({"id": booking_id})
     if not booking:
         raise HTTPException(status_code=404, detail="PS5 booking not found")
@@ -1144,7 +1165,7 @@ async def cancel_ps5_booking(booking_id: str, user=Depends(require_permission("m
 
 
 @api.get("/tables")
-async def list_tables(user=Depends(get_current_user)):
+async def list_tables(user=Depends(require_permission("view_tables"))):
     tables = await db.tables.find({}, {"_id": 0}).sort("table_number", 1).to_list(1000)
     for table in tables:
         if table.get("game_type") == "ps5":
@@ -1175,7 +1196,7 @@ async def create_table(body: TableIn, user=Depends(require_permission("manage_ta
     return {k: v for k, v in t.items() if k != "_id"}
 
 @api.post("/ps5-stations")
-async def create_ps5_station(body: PS5StationIn, user=Depends(require_permission("manage_tables"))):
+async def create_ps5_station(body: PS5StationIn, user=Depends(require_permission("manage_ps5"))):
     table_number = body.table_number.strip()
     table_name = body.table_name.strip()
 
@@ -1252,7 +1273,7 @@ async def delete_table(table_id: str, user=Depends(require_permission("manage_ta
 # ---- Categories ----
 
 @api.get("/categories")
-async def list_categories(user=Depends(get_current_user)):
+async def list_categories(user=Depends(require_permission("view_snacks"))):
     categories = await db.categories.find({}, {"_id": 0}).sort("name", 1).to_list(100)
     return categories
 
@@ -1283,7 +1304,7 @@ async def create_category(body: CategoryIn, user=Depends(require_permission("man
 # ---- Snacks ----
 
 @api.get("/snacks")
-async def list_snacks(user=Depends(get_current_user)):
+async def list_snacks(user=Depends(require_permission("view_snacks"))):
     await client.admin.command("ping")
 
     print("DB NAME EXACT:", repr(db.name))
@@ -1323,7 +1344,7 @@ async def delete_snack(snack_id: str, user=Depends(require_permission("manage_sn
 @api.post("/food-orders")
 async def create_food_order(
     body: FoodOrderCreate,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_food_orders"))
 ):
     if not body.items:
         raise HTTPException(status_code=400, detail="At least one item is required")
@@ -1415,7 +1436,7 @@ async def _session_with_details(s):
 
 @api.get("/food-orders/pending")
 async def list_pending_food_orders(
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("view_food_orders"))
 ):
     orders = await db.food_orders.find(
         {"status": "pending"},
@@ -1427,7 +1448,7 @@ async def list_pending_food_orders(
 @api.get("/food-orders/{order_id}")
 async def get_food_order(
     order_id: str,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("view_food_orders"))
 ):
     order = await db.food_orders.find_one(
         {"id": order_id},
@@ -1446,7 +1467,7 @@ async def get_food_order(
 async def complete_food_order(
     order_id: str,
     body: dict,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_food_orders"))
 ):
     order = await db.food_orders.find_one(
         {"id": order_id},
@@ -1503,7 +1524,7 @@ async def complete_food_order(
 @api.delete("/food-orders/{order_id}")
 async def cancel_food_order(
     order_id: str,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_food_orders"))
 ):
     order = await db.food_orders.find_one(
         {"id": order_id},
@@ -1555,7 +1576,7 @@ async def cancel_food_order(
 async def attach_food_order(
     order_id: str,
     session_id: str = Query(...),
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_food_orders"))
 ):
     order = await db.food_orders.find_one(
         {"id": order_id},
@@ -1652,7 +1673,7 @@ async def attach_food_order(
 async def start_table_from_food_order(
     order_id: str,
     body: FoodOrderAttach,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_food_orders"))
 ):
     # 1. Find the food order
     order = await db.food_orders.find_one(
@@ -1762,7 +1783,7 @@ async def start_table_from_food_order(
 @api.get("/sessions")
 async def list_sessions(
     status: Optional[str] = None,
-    user=Depends(get_current_user)
+    user=Depends(require_permission("view_sessions"))
 ):
     q = {}
 
@@ -1947,7 +1968,7 @@ async def _membership_status(membership, at=None):
 
 
 @api.get("/memberships")
-async def list_memberships(user=Depends(get_current_user)):
+async def list_memberships(user=Depends(require_permission("view_memberships"))):
     rows = await db.memberships.find({"status": "active"}, {"_id": 0}).sort("created_at", -1).to_list(1000)
     result = []
     for membership in rows:
@@ -1956,7 +1977,7 @@ async def list_memberships(user=Depends(get_current_user)):
 
 
 @api.post("/memberships")
-async def create_membership(body: MembershipCreate, user=Depends(require_permission("manage_sessions"))):
+async def create_membership(body: MembershipCreate, user=Depends(require_permission("manage_memberships"))):
     name = body.member_name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Member name is required")
@@ -2007,7 +2028,7 @@ async def _ensure_membership_packages():
 
 
 @api.get("/membership-admin/overview")
-async def membership_admin_overview(user=Depends(require_permission("manage_sessions"))):
+async def membership_admin_overview(user=Depends(require_permission("view_memberships"))):
     await _ensure_membership_packages()
     members = await db.memberships.find({}, {"_id": 0}).to_list(5000)
     now = now_utc()
@@ -2022,7 +2043,7 @@ async def membership_admin_overview(user=Depends(require_permission("manage_sess
 
 @api.get("/membership-admin/packages")
 async def membership_packages(
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("view_memberships"))
 ):
     await _ensure_membership_packages()
 
@@ -2033,7 +2054,7 @@ async def membership_packages(
 
 
 @api.post("/membership-admin/packages")
-async def create_membership_package(body: MembershipPackageIn, user=Depends(require_permission("manage_sessions"))):
+async def create_membership_package(body: MembershipPackageIn, user=Depends(require_permission("manage_memberships"))):
     name = body.name.strip()
     if not name:
         raise HTTPException(status_code=400, detail="Package name is required")
@@ -2047,7 +2068,7 @@ async def create_membership_package(body: MembershipPackageIn, user=Depends(requ
     return item
 
 @api.put("/membership-admin/packages/{package_id}")
-async def update_membership_package(package_id: str, body: MembershipPackageIn, user=Depends(require_permission("manage_sessions"))):
+async def update_membership_package(package_id: str, body: MembershipPackageIn, user=Depends(require_permission("manage_memberships"))):
     item = await db.membership_packages.find_one({"id": package_id})
     if not item:
         raise HTTPException(status_code=404, detail="Package not found")
@@ -2060,7 +2081,7 @@ async def update_membership_package(package_id: str, body: MembershipPackageIn, 
 @api.post("/membership-admin/packages/{package_id}/activate")
 async def activate_membership_package(
     package_id: str,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_memberships"))
 ):
     result = await db.membership_packages.update_one(
         {"id": package_id},
@@ -2084,7 +2105,7 @@ async def activate_membership_package(
 @api.post("/membership-admin/packages/{package_id}/deactivate")
 async def deactivate_membership_package(
     package_id: str,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_memberships"))
 ):
     result = await db.membership_packages.update_one(
         {"id": package_id},
@@ -2110,7 +2131,7 @@ async def deactivate_membership_package(
 @api.delete("/membership-admin/packages/{package_id}")
 async def delete_membership_package(
     package_id: str,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_memberships"))
 ):
     package = await db.membership_packages.find_one({"id": package_id})
 
@@ -2139,7 +2160,7 @@ async def delete_membership_package(
     }
 
 @api.get("/membership-admin/members")
-async def managed_members(user=Depends(require_permission("manage_sessions"))):
+async def managed_members(user=Depends(require_permission("view_memberships"))):
     rows = await db.memberships.find({}, {"_id": 0}).sort("created_at", -1).to_list(5000)
     result = []
     for m in rows:
@@ -2150,7 +2171,7 @@ async def managed_members(user=Depends(require_permission("manage_sessions"))):
 @api.post("/membership-admin/members")
 async def create_managed_member(
     body: ManagedMemberIn,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_memberships"))
 ):
     await _ensure_membership_packages()
 
@@ -2270,7 +2291,7 @@ async def create_managed_member(
 async def update_managed_member(
     member_id: str,
     body: ManagedMemberUpdate,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_memberships"))
 ):
     values = {
         k: v
@@ -2329,7 +2350,7 @@ async def update_managed_member(
 @api.delete("/membership-admin/members/{member_id}")
 async def delete_managed_member(
     member_id: str,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("manage_memberships"))
 ):
     result = await db.memberships.update_one(
         {"id": member_id, "status": {"$ne": "inactive"}},
@@ -2350,7 +2371,7 @@ async def delete_managed_member(
 
 @api.get("/membership-admin/game-records")
 async def membership_game_records(
-    user=Depends(require_permission("manage_sessions")),
+    user=Depends(require_permission("view_memberships")),
     limit: int = Query(500, ge=1, le=2000)
 ):
     # Fetch actual membership gameplay sessions
@@ -2419,7 +2440,6 @@ async def membership_game_records(
                 "membership_exhausted", False
             ),
 
-            "frames": session.get("frames", [])
         })
 
     return output
@@ -2444,7 +2464,7 @@ async def _scan_timer_alerts_once():
     now = now_utc()
     cursor = db.sessions.find(
         {"status": "active", "game_timer_enabled": True, "timer_mode": {"$in": ["countdown", "awaiting_decision"]}},
-        {"_id": 0, "id": 1, "game_type": 1, "table_number": 1, "current_frame": 1, "is_paused": 1, "game_billing_segments": 1}
+        {"_id": 0, "id": 1, "game_type": 1, "table_number": 1, "is_paused": 1, "game_billing_segments": 1}
     )
     async for session in cursor:
         segments = session.get("game_billing_segments") or []
@@ -2454,7 +2474,6 @@ async def _scan_timer_alerts_once():
         remaining, threshold = _timer_alert_remaining(session, segment, now)
         if remaining is None or remaining > threshold:
             continue
-        frame = session.get("current_frame") or {}
         alert = {
             "id": str(uuid.uuid4()), "timer_block_id": segment["id"],
             "session_id": session["id"],
@@ -2462,7 +2481,6 @@ async def _scan_timer_alerts_once():
             "table_number": session.get("table_number") or "Unknown",
             "remaining_seconds": remaining,
             "remaining_display": f"{remaining // 60:02d}:{remaining % 60:02d}",
-            "frame_number": frame.get("frame_number", "Unavailable"),
             "message": "Please inform the customer.", "created_at": iso(now),
         }
         try:
@@ -2483,14 +2501,14 @@ async def _timer_alert_worker():
 
 
 @api.get("/timer-alerts/pending")
-async def pending_timer_alerts(user=Depends(get_current_user)):
+async def pending_timer_alerts(user=Depends(require_permission("manage_sessions"))):
     delivered = await db.timer_alert_deliveries.find({"user_id": user["id"]}, {"_id": 0, "alert_id": 1}).to_list(5000)
     delivered_ids = [x["alert_id"] for x in delivered]
     return await db.timer_alerts.find({"id": {"$nin": delivered_ids}}, {"_id": 0}).sort("created_at", 1).to_list(100)
 
 
 @api.post("/timer-alerts/{alert_id}/claim")
-async def claim_timer_alert(alert_id: str, user=Depends(get_current_user)):
+async def claim_timer_alert(alert_id: str, user=Depends(require_permission("manage_sessions"))):
     alert = await db.timer_alerts.find_one({"id": alert_id}, {"_id": 0})
     if not alert:
         raise HTTPException(status_code=404, detail="Timer alert not found")
@@ -2502,7 +2520,7 @@ async def claim_timer_alert(alert_id: str, user=Depends(get_current_user)):
 
 
 @api.get("/sessions/active")
-async def active_sessions(user=Depends(get_current_user)):
+async def active_sessions(user=Depends(require_permission("view_sessions"))):
     rows = await db.sessions.find(
         {"status": "active"},
         {
@@ -2517,8 +2535,6 @@ async def active_sessions(user=Depends(get_current_user)):
             "pause_started_at": 1,
             "paused_seconds": 1,
             "pause_reason": 1,
-            "current_frame": 1,
-            "frames": 1,
             "snacks": 1,
             "duration_minutes": 1,
             "rate_used": 1,
@@ -2579,38 +2595,19 @@ async def active_sessions(user=Depends(get_current_user)):
         )
 
         rate = float(r.get("rate_used", 0))
-        frames = r.get("frames") or []
-        table_amount = sum(
-            float(frame.get("amount", 0))
-            for frame in frames
-        )
-
-        current_frame = r.get("current_frame")
-        if current_frame and current_frame.get("start_time"):
-            now = now_utc()
-            frame_start = datetime.fromisoformat(
-                current_frame["start_time"]
-            )
-            frame_paused_seconds = float(
-                current_frame.get("paused_seconds", 0)
-            )
-
-            current_pause_seconds = 0
-            if r.get("is_paused") and r.get("pause_started_at"):
-                current_pause_seconds = (
-                    now - datetime.fromisoformat(
-                        r["pause_started_at"]
-                    )
-                ).total_seconds()
-
-            elapsed_seconds = max(
+        now = now_utc()
+        start_dt = datetime.fromisoformat(r["start_time"])
+        paused_seconds = float(r.get("paused_seconds", 0) or 0)
+        if r.get("is_paused") and r.get("pause_started_at"):
+            paused_seconds += max(
                 0,
-                (now - frame_start).total_seconds()
-                - frame_paused_seconds
-                - current_pause_seconds
+                (now - datetime.fromisoformat(r["pause_started_at"])).total_seconds(),
             )
-
-            table_amount += (elapsed_seconds / 3600) * rate
+        elapsed_seconds = max(
+            0,
+            (now - start_dt).total_seconds() - paused_seconds,
+        )
+        table_amount = (elapsed_seconds / 3600.0) * rate
 
         if r.get("game_timer_enabled"):
             r["table_amount"] = _game_timer_amount(r, now_utc())
@@ -2622,7 +2619,7 @@ async def active_sessions(user=Depends(get_current_user)):
 
 
 @api.get("/sessions/{session_id}")
-async def get_session(session_id: str, user=Depends(get_current_user)):
+async def get_session(session_id: str, user=Depends(require_permission("view_sessions"))):
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -2632,7 +2629,7 @@ async def get_session(session_id: str, user=Depends(get_current_user)):
 @api.delete("/sessions/{session_id}")
 async def clear_session(
     session_id: str,
-    user=Depends(require_permission("manage_sessions"))
+    user=Depends(require_permission("clear_session"))
 ):
     # Separate permission required to permanently clear sessions
     if not has_permission(user, "clear_session"):
@@ -2830,21 +2827,6 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "status": "active",
         "started_by": user["id"],
         "started_by_name": user.get("name", ""),
-        "frames": [],
-        "current_frame": {
-            "id": str(uuid.uuid4()),
-            "frame_number": 1,
-            "player_a": "",
-            "player_b": "",
-            "start_time": iso(now_utc()),
-            "end_time": None,
-            "winner": None,
-            "loser": None,
-            "paid_by": None,
-            "notes": "",
-            "duration_minutes": 0,
-            "paused_seconds": 0,
-        },
         "payment_method": None,
         "payment_notes": "",
     }
@@ -3048,14 +3030,7 @@ async def pause_session(
             detail="Session is already paused"
             )
 
-    # New game timers are session-based and can be paused even when no frame is active.
-    if not s.get("current_frame") and not s.get("game_timer_enabled"):
-        raise HTTPException(
-            status_code=400,
-            detail="Please start a frame first. You can pause the session only while a frame is running."
-        )
-
-    if reason not in ["MANUAL", "BILLING", "FRAME_END"]:
+    if reason not in ["MANUAL", "BILLING"]:
         raise HTTPException(
             status_code=400,
             detail="Invalid pause reason"
@@ -3122,16 +3097,6 @@ async def resume_session(
 
     paused_seconds += (now_utc() - pause_started_at).total_seconds()
 
-    current_frame = s.get("current_frame")
-
-    pause_duration = (now_utc() - pause_started_at).total_seconds()
-
-    if current_frame:
-        current_frame["paused_seconds"] = (
-            current_frame.get("paused_seconds", 0)
-            + pause_duration
-        )
-
     resume_now = now_utc()
     timer_updates = _resume_game_timer(s, resume_now) if s.get("game_timer_enabled") else {}
     await db.sessions.update_one(
@@ -3142,7 +3107,6 @@ async def resume_session(
                 "pause_started_at": None,
                 "paused_seconds": paused_seconds,
                 "pause_reason": None,
-                "current_frame": current_frame,
                 **timer_updates,
                 **({"membership_usage_cursor": iso(resume_now)} if s.get("billing_type") == "membership" else {}),
             }
@@ -3153,7 +3117,6 @@ async def resume_session(
     s["pause_started_at"] = None
     s["paused_seconds"] = paused_seconds
     s["pause_reason"] = None
-    s["current_frame"] = current_frame
     s.update(timer_updates)
     s["table"] = await db.tables.find_one(
         {"id": s["table_id"]},
@@ -3162,109 +3125,41 @@ async def resume_session(
 
     return s
 
-class FinalizePreviewBody(BaseModel):
-    player_a: Optional[str] = ""
-    player_b: Optional[str] = ""
-    winner: Optional[str] = ""
-    paid_by: Optional[str] = ""
-    notes: Optional[str] = ""
-
 @api.post("/sessions/{session_id}/finalize-preview")
-async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depends(require_permission("manage_sessions"))):
-    """Computes an EPHEMERAL billing snapshot for the End & Bill modal.
-    Does NOT persist any freeze state. Each call returns a FRESH snapshot from the current time.
-    On modal cancel, the caller discards the snapshot and the session keeps running live.
-    On confirm (/end), the caller passes the snapshot back in the request body."""
+async def finalize_preview(session_id: str, user=Depends(require_permission("manage_sessions"))):
+    """Build a fresh, session-level billing snapshot without persisting a freeze."""
     s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     if not s or s["status"] != "active":
         raise HTTPException(status_code=400, detail="Session is not active")
+
+    now = now_utc()
     if s.get("game_timer_enabled"):
-        s = await _sync_game_timer(s, now_utc())
-    end = now_utc() 
+        s = await _sync_game_timer(s, now)
+    if s.get("billing_type") == "membership" and not s.get("is_paused"):
+        s = await _settle_membership_usage(s, now)
+
+    end = now
     start = datetime.fromisoformat(s["start_time"])
-    paused_seconds = float(s.get("paused_seconds", 0))
-
+    paused_seconds = float(s.get("paused_seconds", 0) or 0)
     if s.get("is_paused") and s.get("pause_started_at"):
-        pause_started = datetime.fromisoformat(s["pause_started_at"])
-        paused_seconds += (end - pause_started).total_seconds()
-
-    duration_seconds = max(
-        0,
-        (end - start).total_seconds() - paused_seconds,
-    )
-    duration_minutes = int(duration_seconds / 60)
-    duration_hours = duration_seconds / 3600.0
-    rate = float(s["rate_used"])
-    frames = s.get("frames", [])
-
-    # Always start with completed frames
-    table_amount_raw = sum(float(f.get("amount", 0)) for f in frames)
-
-    # Always add the currently running frame (preview only)
-    cf = None
-
-    if s.get("current_frame"):
-        cf = dict(s["current_frame"])
-
-        cf["player_a"] = body.player_a
-        cf["player_b"] = body.player_b
-        cf["winner"] = body.winner
-        if body.winner == body.player_a:
-            cf["loser"] = body.player_b
-        elif body.winner == body.player_b:
-            cf["loser"] = body.player_a
-        else:
-            cf["loser"] = ""
-        cf["paid_by"] = body.paid_by
-        cf["notes"] = body.notes
-
-        frame_start = datetime.fromisoformat(cf["start_time"])
-        frame_paused_seconds = float(
-            cf.get("paused_seconds", 0)
-        )
-
-        # If billing was opened while this frame was running,
-        # the current billing pause has not yet been added to
-        # the frame's paused_seconds, so subtract it here.
-        if s.get("is_paused") and s.get("pause_started_at"):
-            current_pause_seconds = (
-                end - datetime.fromisoformat(s["pause_started_at"])
-            ).total_seconds()
-        else:
-            current_pause_seconds = 0
-
-        cf_seconds = max(
+        paused_seconds += max(
             0,
-            (end - frame_start).total_seconds()
-            - frame_paused_seconds
-            - current_pause_seconds
+            (end - datetime.fromisoformat(s["pause_started_at"])).total_seconds(),
         )
 
-        cf_amount = round((cf_seconds / 3600.0) * rate, 2)
+    duration_seconds = max(0, (end - start).total_seconds() - paused_seconds)
+    duration_minutes = int(duration_seconds / 60)
+    rate = float(s.get("rate_used", 0))
 
-        cf["end_time"] = iso(end)
-        cf["duration_minutes"] = int(cf_seconds / 60)
-        cf["amount"] = cf_amount
-
-        table_amount_raw += cf_amount
-
-    # If there are no frames at all, fall back to whole session
-    if not frames and not s.get("current_frame"):
-        table_amount_raw = duration_hours * rate
-        print({
-    "frames_total": sum(float(f.get("amount", 0)) for f in frames),
-    "current_frame_amount": cf["amount"] if cf else None,
-    "table_amount_raw": table_amount_raw,
-})
     if s.get("game_timer_enabled"):
         duration_seconds = _game_timer_played_seconds(s, end)
         duration_minutes = int(duration_seconds / 60)
         table_amount = _game_timer_amount(s, end)
-        if cf:
-            cf["amount"] = 0.0
+    elif s.get("billing_type") == "membership":
+        table_amount = float(s.get("membership_extra_player_charge", 0))
     else:
-        table_amount = float(s.get("membership_extra_player_charge", 0)) if s.get("billing_type") == "membership" else round(table_amount_raw, 2)
-    # Calculate snack amount directly from the actual session items
+        table_amount = round((duration_seconds / 3600.0) * rate, 2)
+
     snacks_amount = round(
         sum(
             float(item.get("subtotal", float(item.get("price", 0)) * int(item.get("quantity", 0))))
@@ -3277,17 +3172,13 @@ async def finalize_preview(session_id: str, body: FinalizePreviewBody, user=Depe
         if s.get("rd_selected") and _game_type(s) in ("snooker", "mini_snooker")
         else 0.0
     )
-    # Timer billing helper already includes RD in table_amount; classic frame billing does not.
     rd_additional = 0.0 if s.get("game_timer_enabled") else rd_amount
     grand_total_exact = round(table_amount + rd_additional + snacks_amount, 2)
     grand_total = int(round(grand_total_exact))
+
     await _session_with_details(s)
-    # Strip any legacy preview_* fields that may exist from before this refactor
-    for k in ("preview_end_time", "preview_duration_minutes", "preview_table_amount", "preview_grand_total", "preview_grand_total_exact"):
-        s.pop(k, None)
     return {
         **s,
-        "preview_frame": cf if s.get("current_frame") else None,
         "freeze_snapshot": {
             "end_time": iso(end),
             "duration_seconds": int(duration_seconds),
@@ -3354,47 +3245,13 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
 
     duration_minutes = int(duration_seconds / 60)
 
-    # Close current frame (if any) at the authoritative end timestamp — BEFORE writing session
-    frames = list(s.get("frames") or [])
-    if s.get("current_frame"):
-        frame = dict(s["current_frame"])
-        frame["end_time"] = iso(end)
-        frame_start = datetime.fromisoformat(frame["start_time"])
-        frame_paused_seconds = float(
-            frame.get("paused_seconds", 0)
-        )
-
-        # If the current frame is frozen for billing,
-        # exclude the current billing pause as well.
-        if s.get("is_paused") and s.get("pause_started_at"):
-            current_pause_seconds = (
-                end - datetime.fromisoformat(s["pause_started_at"])
-            ).total_seconds()
-        else:
-            current_pause_seconds = 0
-
-        dur_sec = max(
-            0,
-            (end - frame_start).total_seconds()
-            - frame_paused_seconds
-            - current_pause_seconds
-        )
-        frame["duration_minutes"] = int(dur_sec / 60)
-        frame["amount"] = round((dur_sec / 3600.0) * rate, 2)
-        frame["auto_closed"] = True
-        frames.append(frame)
-
-    # Table amount: sum of frame amounts if any, else full duration × rate
+    # All non-timer sessions are billed from the full session duration.
     if s.get("game_timer_enabled"):
         duration_seconds = _game_timer_played_seconds(s, end)
         duration_minutes = int(duration_seconds / 60)
         table_amount = _game_timer_amount(s, end)
-        for frame in frames:
-            frame["amount"] = 0.0
     elif s.get("billing_type") == "membership":
         table_amount = float(s.get("membership_extra_player_charge", 0))
-    elif frames:
-        table_amount = round(sum(float(f.get("amount", 0)) for f in frames), 2)
     else:
         table_amount = round((duration_seconds / 3600.0) * rate, 2)
     payment_method = (body.payment_method or "cash").lower()
@@ -3452,8 +3309,6 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
         "grand_total": grand_total,
         "grand_total_exact": grand_total_exact,
         "status": "completed",
-        "frames": frames,
-        "current_frame": None,
         "rd_selected": bool(s.get("rd_selected")),
         "invoice_no": invoice_no,
         "ended_at": iso(end),
@@ -3519,29 +3374,13 @@ async def continue_membership_as_normal(session_id: str, user=Depends(require_pe
         raise HTTPException(status_code=404, detail="Table not found")
     now = now_utc()
     exhausted_at = datetime.fromisoformat(old.get("pause_started_at") or iso(now))
-    old_frames = list(old.get("frames") or [])
-    current = old.get("current_frame")
-    if current:
-        closed = dict(current)
-        closed["end_time"] = iso(exhausted_at)
-        closed["auto_closed"] = True
-        old_frames.append(closed)
     await db.sessions.update_one({"id": session_id}, {"$set": {
         "status": "completed", "end_time": iso(exhausted_at), "ended_at": iso(exhausted_at),
-        "current_frame": None, "frames": old_frames, "table_amount": 0.0,
+        "table_amount": 0.0,
         "grand_total": 0, "grand_total_exact": 0.0, "discount": 0.0,
         "tax_amount": 0.0, "payment_method": "membership", "membership_converted": True,
         "ended_by": user["id"], "ended_by_name": user.get("name", ""),
     }})
-    new_frame = None
-    if current:
-        new_frame = {
-            "id": str(uuid.uuid4()), "frame_number": 1,
-            "player_a": current.get("player_a", ""), "player_b": current.get("player_b", ""),
-            "start_time": iso(now), "end_time": None, "winner": None, "loser": None,
-            "paid_by": None, "notes": current.get("notes", ""),
-            "duration_minutes": 0, "paused_seconds": 0,
-        }
     new_session = {
         "id": str(uuid.uuid4()), "table_id": table["id"], "table_number": table["table_number"],
         "customer_name": old.get("customer_name", ""), "notes": old.get("notes", ""),
@@ -3551,163 +3390,13 @@ async def continue_membership_as_normal(session_id: str, user=Depends(require_pe
         "snacks": old.get("snacks", []), "snacks_amount": float(old.get("snacks_amount", 0)),
         "discount": 0.0, "tax_percent": 0.0, "tax_amount": 0.0, "grand_total": 0.0,
         "status": "active", "started_by": user["id"], "started_by_name": user.get("name", ""),
-        "frames": [], "current_frame": new_frame, "payment_method": None, "payment_notes": "",
+        "payment_method": None, "payment_notes": "",
         "continued_from_membership_session_id": session_id,
     }
     await db.sessions.insert_one(new_session.copy())
     await db.sessions.update_one({"id": session_id}, {"$set": {"snacks": [], "snacks_amount": 0.0}})
     new_session["table"] = table
     return new_session
-
-
-# ---- Frames ----
-@api.post("/sessions/{session_id}/frames/start")
-async def start_frame(session_id: str, body: FrameStart, user=Depends(require_permission("manage_sessions"))):
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-
-    if not s or s["status"] != "active":
-        raise HTTPException(status_code=400, detail="Session is not active")
-
-    if s.get("current_frame"):
-        raise HTTPException(
-            status_code=400,
-            detail="A frame is already running. End it first."
-        )
-
-    now = now_utc()
-
-    # If the session is paused because the previous frame ended,
-    # resume it now and record the pause duration.
-    paused_seconds = s.get("paused_seconds", 0)
-
-    if s.get("is_paused") and s.get("pause_started_at"):
-        pause_started_at = datetime.fromisoformat(s["pause_started_at"])
-        paused_seconds += (now - pause_started_at).total_seconds()
-
-    frame_no = len(s.get("frames", [])) + 1
-
-    frame = {
-        "id": str(uuid.uuid4()),
-        "frame_number": frame_no,
-        "player_a": "",
-        "player_b": "",
-        "start_time": iso(now),
-        "end_time": None,
-        "winner": None,
-        "loser": None,
-        "paid_by": None,
-        "notes": "",
-        "duration_minutes": 0,
-        "paused_seconds": 0,
-    }
-
-    await db.sessions.update_one(
-        {"id": session_id},
-        {
-            "$set": {
-                "current_frame": frame,
-                "is_paused": False,
-                "pause_started_at": None,
-                "paused_seconds": paused_seconds,
-                "pause_reason": None,
-            }
-        },
-    )
-
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    await _session_with_details(s)
-    return s
-
-@api.post("/sessions/{session_id}/frames/end")
-async def end_frame(session_id: str, body: FrameEnd, user=Depends(require_permission("manage_sessions"))):
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-
-    if not s or s["status"] != "active":
-        raise HTTPException(status_code=400, detail="Session is not active")
-
-    if s.get("billing_type") == "membership" and not s.get("is_paused"):
-        s = await _settle_membership_usage(s, now_utc())
-        if s.get("membership_exhausted"):
-            raise HTTPException(status_code=409, detail="Membership daily allowance exhausted")
-
-    frame = s.get("current_frame")
-
-    if not frame:
-        raise HTTPException(
-            status_code=400,
-            detail="No active frame. Start one first."
-        )
-
-    now = now_utc()
-
-    frame["player_a"] = body.player_a or ""
-    frame["player_b"] = body.player_b or ""
-    frame["winner"] = body.winner or ""
-
-    if body.winner == body.player_a:
-        frame["loser"] = body.player_b or ""
-    elif body.winner == body.player_b:
-        frame["loser"] = body.player_a or ""
-    else:
-        frame["loser"] = ""
-
-    frame["paid_by"] = body.paid_by or ""
-    frame["notes"] = body.notes or ""
-    frame["end_time"] = iso(now)
-
-    # Calculate frame duration.
-    # If the session was manually paused during this frame,
-    # include the current pause in the frame's paused time.
-    elapsed = (
-        datetime.fromisoformat(frame["end_time"])
-        - datetime.fromisoformat(frame["start_time"])
-    ).total_seconds()
-
-    frame_paused = float(frame.get("paused_seconds", 0))
-
-    if s.get("is_paused") and s.get("pause_started_at"):
-        pause_started_at = datetime.fromisoformat(s["pause_started_at"])
-        frame_paused += (now - pause_started_at).total_seconds()
-
-    dur_sec = max(0, elapsed - frame_paused)
-
-    frame["duration_minutes"] = int(dur_sec / 60)
-    frame["amount"] = 0.0 if s.get("game_timer_enabled") else round(
-        (dur_sec / 3600.0) * float(s.get("rate_used", 0)),
-        2,
-    )
-
-    frames = s.get("frames", []) + [frame]
-
-    # Ending a frame pauses the SESSION.
-    # The session stays active and the table remains occupied.
-    await db.sessions.update_one(
-        {"id": session_id},
-        {
-            "$set": {
-                "frames": frames,
-                "current_frame": None,
-                "is_paused": True,
-                "pause_started_at": iso(now),
-                "pause_reason": "FRAME_END",
-            }
-        },
-    )
-
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    await _session_with_details(s)
-    return s
-
-@api.post("/sessions/{session_id}/frames/stop")
-async def stop_frame(session_id: str, user=Depends(require_permission("manage_sessions"))):
-    """Cancel current frame without a winner (rare)."""
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    if not s or s["status"] != "active":
-        raise HTTPException(status_code=400, detail="Session is not active")
-    await db.sessions.update_one({"id": session_id}, {"$set": {"current_frame": None}})
-    s = await db.sessions.find_one({"id": session_id}, {"_id": 0})
-    await _session_with_details(s)
-    return s
 
 
 async def timed_dashboard_query(name, operation):
@@ -3726,7 +3415,7 @@ async def timed_dashboard_query(name, operation):
 
 # ---- Dashboard ----
 @api.get("/dashboard/stats")
-async def dashboard_stats(user=Depends(get_current_user)):
+async def dashboard_stats(user=Depends(require_permission("view_dashboard"))):
     today_start, today_end = local_day_range()
     tables, active_table_sessions, active_ps5_sessions, completed_today, food_orders_today, membership_payments_today = await asyncio.gather(
         timed_dashboard_query(
@@ -3850,7 +3539,7 @@ async def dashboard_stats(user=Depends(get_current_user)):
     }
 
 @api.get("/dashboard/charts")
-async def dashboard_charts(user=Depends(get_current_user)):
+async def dashboard_charts(user=Depends(require_permission("view_dashboard"))):
     # Daily revenue for last 7 days
     now = datetime.now(timezone.utc)
     daily_start = (now - timedelta(days=6)).replace(
@@ -3981,7 +3670,7 @@ async def dashboard_charts(user=Depends(get_current_user)):
     return {"daily": daily, "snack_sales": snack_sales, "peak_hours": peak}
 
 @api.get("/dashboard/recent")
-async def dashboard_recent(user=Depends(get_current_user)):
+async def dashboard_recent(user=Depends(require_permission("view_dashboard"))):
     sessions, bills = await asyncio.gather(
     db.sessions.find(
         {},
@@ -4295,7 +3984,7 @@ async def _find_expense_category(category_id: str):
 
 @api.get("/expenses/categories")
 async def list_expense_categories(
-    user=Depends(get_current_user)
+    user=Depends(require_permission("view_expenses"))
 ):
     categories = await db.expense_categories.find(
         {"active": True},
@@ -5313,19 +5002,19 @@ async def seed():
         })
         logger.info(f"Seeded staff: {staff_email}")
 
-    # Backfill: any staff without permissions gets defaults
-    await db.users.update_many(
-        {"role": "staff", "permissions": {"$exists": False}},
-        {"$set": {"permissions": DEFAULT_STAFF_PERMISSIONS.copy()}},
-    )
-    # Backfill: add any newly-added permission keys defaulting to False on existing users
-    all_staff = await db.users.find({"role": "staff"}, {"_id": 0}).to_list(500)
-    for u in all_staff:
-        perms = u.get("permissions") or {}
-        missing = {k: False for k in ALL_PERMISSIONS if k not in perms}
-        if missing:
-            merged = {**perms, **missing}
-            await db.users.update_one({"id": u["id"]}, {"$set": {"permissions": merged}})
+    # One-time migration: reset every existing staff account to the new read-only defaults.
+    # The marker prevents subsequent server restarts from overwriting admin-customized grants.
+    reset_marker = await db.settings.find_one({"key": "staff_permissions_reset_v2"})
+    if not reset_marker:
+        await db.users.update_many(
+            {"role": "staff"},
+            {"$set": {"permissions": DEFAULT_STAFF_PERMISSIONS.copy()}},
+        )
+        await db.settings.update_one(
+            {"key": "staff_permissions_reset_v2"},
+            {"$set": {"key": "staff_permissions_reset_v2", "completed_at": iso(now_utc())}},
+            upsert=True,
+        )
 
     # Indexes
     await db.expenses.create_index("date")

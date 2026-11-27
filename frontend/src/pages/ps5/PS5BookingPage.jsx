@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  CalendarDays, Plus, XCircle, CalendarCheck, ChevronLeft, ChevronRight, Clock3
+  CalendarDays, Plus, ChevronLeft, ChevronRight, Clock3
 } from "lucide-react";
 import { toast } from "sonner";
 import api, { formatApiErrorDetail, inr } from "@/lib/api";
@@ -89,6 +89,7 @@ export default function PS5Bookings() {
   const submit = async (e) => {
     e.preventDefault();
     if (!form.customer_name.trim()) return toast.error("Enter the customer name");
+    if (form.phone && !/^\d{10}$/.test(form.phone)) return toast.error("Phone number must be exactly 10 digits");
     if (Number.isNaN(startAt.getTime())) return toast.error("Choose a valid date and time");
     if (isPastSelection) return toast.error("Booking start time cannot be in the past");
     if (form.billing_type === "membership" && !form.membership_id) return toast.error("Select a membership");
@@ -132,30 +133,26 @@ export default function PS5Bookings() {
     } catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail || "Could not start booking")); }
   };
 
-  const cancel = async (id) => {
-    if (!window.confirm("Cancel this PS5 booking?")) return;
-    try { await api.post(`/ps5-bookings/${id}/cancel`); toast.success("Booking cancelled"); await load(true); }
-    catch (e) { toast.error(formatApiErrorDetail(e.response?.data?.detail || "Could not cancel booking")); }
-  };
+
 
 
 
   return <div className="ps5-shell" data-testid="ps5-bookings-page">
-    <main className="ps5-main space-y-6">
+    <main className="ps5-main space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">PS5 Bookings</h1>
-          <p className="text-sm text-gray-400 mt-1">Create reservations and manage existing bookings.</p>
+          <h1 className="text-xl font-bold text-white">PS5 Bookings</h1>
+          <p className="text-xs text-gray-400 mt-0.5">Create reservations and manage existing bookings.</p>
         </div>
         <button type="button" onClick={() => load()} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-[#303030] bg-[#151515] text-sm text-gray-200 hover:bg-[#202020]"><span>Refresh</span></button>
       </div>
 
-      <div className="grid 2xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,.8fr)] gap-5">
-        <form onSubmit={submit} className="rounded-2xl border border-[#292929] bg-[#121212] p-5 space-y-4" id="new-booking-form">
+      <div className="w-full min-w-0 flex justify-center">
+        <form onSubmit={submit} style={{ width: "100%", maxWidth: "1040px", marginInline: "auto" }} className="min-w-0 rounded-2xl border border-[#292929] bg-[#121212] p-5 space-y-4" id="new-booking-form">
           <div className="flex items-center gap-2 font-semibold"><Plus className="w-4 h-4 text-green-400"/>New reservation</div>
-          <div className="grid sm:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-4">
             <Field label="Customer name"><input required value={form.customer_name} onChange={e=>changeForm({customer_name:e.target.value})} className="booking-input" placeholder="Customer name"/></Field>
-            <Field label="Phone (optional)"><input value={form.phone} onChange={e=>changeForm({phone:e.target.value})} className="booking-input" placeholder="Mobile number"/></Field>
+            <Field label="Phone (optional)"><input type="tel" inputMode="numeric" autoComplete="tel-national" maxLength={10} pattern="[0-9]{10}" value={form.phone} onChange={e=>changeForm({phone:e.target.value.replace(/\D/g, "").slice(0, 10)})} className="booking-input" placeholder="10-digit mobile number"/></Field>
             <Field label="Booking date">
               <DatePicker value={form.start_date} minDate={dateKey(new Date())} onChange={value=>changeForm({start_date:value,table_id:""})}/>
             </Field>
@@ -181,38 +178,21 @@ export default function PS5Bookings() {
               <select required value={form.membership_id} onChange={e=>changeForm({membership_id:e.target.value})} className="booking-input"><option value="">Choose active membership</option>{memberships.map(m=><option key={m.id} value={m.id}>{m.member_name} · {m.plan} · {(m.remaining_total_seconds/3600).toFixed(1)}h left</option>)}</select>
             </Field>}
           </div>
-
-          <div className="rounded-xl border border-[#303030] bg-[#0d0d0d] p-3">
-            <div className="flex flex-wrap justify-between gap-2 text-sm"><span className="text-gray-400">Selected time</span><strong>{fmt(startAt)} – {fmt(endAt)}</strong></div>
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-              {(() => { const chosen=stationAvailability.find(x=>x.station.id===form.table_id); return <span className={chosen?.conflict ? "text-red-400" : "text-green-400"}>{form.table_id ? (chosen?.conflict ? `Unavailable: ${chosen.conflict.label}` : "Station is free for this slot") : "A free station will be assigned automatically"}</span>; })()}
-              <span className="text-gray-500">{form.duration_minutes} min · {form.player_count} {form.player_count===1?"player":"players"}</span>
-            </div>
-          </div>
           <Field label="Notes (optional)"><textarea rows={2} value={form.notes} onChange={e=>changeForm({notes:e.target.value})} className="booking-input h-auto" placeholder="Any booking notes"/></Field>
-          <div className="rounded-xl border border-green-800/40 bg-green-950/20 p-4 flex items-center justify-between gap-3">
+          <div className="rounded-xl border border-green-800/40 bg-green-950/20 p-2.5 flex items-center justify-between gap-3">
             <div><div className="text-xs text-gray-400">{form.billing_type === "membership" ? "Due when the actual session ends" : "Estimated booking charge"}</div><div className="text-xs text-gray-500 mt-1">{form.duration_minutes} min · ends {fmt(endAt)}</div>{form.billing_type === "membership" && selectedMember && <div className="text-xs text-gray-500 mt-1">No membership time is deducted until session start. Extra-player fee follows membership rules.</div>}{form.billing_type === "normal" && <div className="text-xs text-gray-500 mt-1">{money(hourlyRate)}/hour</div>}</div>
             <div className="text-xl font-bold text-green-400">{form.billing_type === "membership" ? "₹0 advance" : money(estimated)}</div>
           </div>
-          <button disabled={saving || !tables.length || isPastSelection || (form.table_id && !!stationAvailability.find(x=>x.station.id===form.table_id)?.conflict)} className="w-full rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-50 py-3 font-semibold">{saving ? "Confirming…" : "Confirm booking"}</button>
+          <button disabled={saving || !tables.length || isPastSelection || (form.table_id && !!stationAvailability.find(x=>x.station.id===form.table_id)?.conflict)} className="w-full rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-50 py-2 font-semibold">{saving ? "Confirming…" : "Confirm booking"}</button>
         </form>
 
-        <section className="rounded-2xl border border-[#292929] bg-[#121212] p-5">
-          <div className="flex items-center justify-between gap-2 mb-4"><div className="font-semibold flex items-center gap-2"><CalendarCheck className="w-4 h-4 text-green-400"/>Reservations</div><span className="text-xs text-gray-500">{bookings.length} records</span></div>
-          {loading ? <p className="text-sm text-gray-500">Loading bookings…</p> : bookings.length === 0 ? <p className="text-sm text-gray-500">No bookings yet.</p> : <div className="space-y-3 max-h-[760px] overflow-y-auto pr-1">{bookings.map(b=><div key={b.id} className="rounded-xl border border-[#292929] bg-[#0d0d0d] p-3">
-            <div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="font-semibold truncate">{b.customer_name}</div><div className="text-xs text-green-400 mt-1">{b.table_number} · {b.player_count} {b.player_count===1?"player":"players"} · {b.duration_minutes} min</div><div className={`text-[11px] uppercase mt-1 ${statusClass(b.status)}`}>{String(b.status || "confirmed").replace("_"," ")}</div></div>
-              {b.status === "confirmed" && <div className="flex items-center gap-3"><button onClick={()=>startBooking(b)} className="text-xs font-semibold text-green-400 hover:text-green-300">Start now</button><button onClick={()=>cancel(b.id)} title="Cancel booking" className="text-gray-500 hover:text-red-400"><XCircle className="w-4 h-4"/></button></div>}
-            </div><div className="text-xs text-gray-400 mt-2">{fmt(b.start_at)} – {fmt(b.end_at)}</div><div className="text-sm font-semibold mt-2">{b.membership_id ? `Membership: ${b.membership_name || "Linked member"} · No advance deduction` : money(b.amount)}</div>{b.phone && <div className="text-xs text-gray-500 mt-1">{b.phone}</div>}
-          </div>)}</div>}
-        </section>
       </div>
     </main>
     <style>{`
-      .ps5-shell{display:block;color:#f5f5f5}
+      .ps5-shell{display:block;width:100%;max-width:100%;min-width:0;overflow-x:clip;color:#f5f5f5}
       
-      .ps5-main{min-width:0}.booking-input{width:100%;height:42px;padding:9px 11px;border-radius:9px;background:#0b0b0b;border:1px solid #303030;color:#f5f5f5;outline:none}.booking-input:focus{border-color:#15803d}.booking-input option{background:#111;color:#fff}.booking-input.h-auto{height:auto}.date-control{width:auto;min-width:150px}
-      
-      
+      .ps5-main{display:block;width:100%;max-width:100%;min-width:0;overflow-x:clip}.ps5-main *{min-width:0;max-width:100%}.booking-input{width:100%;height:38px;padding:7px 10px;border-radius:9px;background:#0b0b0b;border:1px solid #303030;color:#f5f5f5;outline:none}.booking-input:focus{border-color:#15803d}.booking-input option{background:#111;color:#fff}.booking-input.h-auto{height:auto;min-height:56px;padding:7px 10px}.date-control{width:auto;min-width:150px}
+      @media (min-width: 768px) and (min-height: 700px){.ps5-shell{height:calc(100vh - 120px);overflow:hidden}.ps5-main{height:100%;overflow:hidden}}
     `}</style>
   </div>;
 }
@@ -296,4 +276,3 @@ function TimePicker({value,onChange}) {
 }
 
 function Field({label,children}) { return <label className="block"><span className="block text-[11px] uppercase tracking-wider text-gray-400 font-semibold mb-1.5">{label}</span>{children}</label>; }
-function statusClass(status) { return ({confirmed:"text-blue-400",started:"text-green-400",no_show:"text-red-400",completed:"text-gray-500"}[status] || "text-gray-400"); }

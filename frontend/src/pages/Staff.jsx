@@ -5,17 +5,28 @@ import { Plus, Trash2, X, ShieldCheck, KeyRound, Check, Lock } from "lucide-reac
 import { toast } from "sonner";
 
 const PERMISSION_LABELS = {
+  view_dashboard: { label: "View Dashboard", desc: "See club overview and dashboard analytics" },
+  view_tables: { label: "View Tables", desc: "See snooker tables and their status" },
   manage_tables: { label: "Manage Tables", desc: "Add, edit and delete snooker tables" },
-  manage_snacks: { label: "Manage Snacks", desc: "Add, edit and delete snacks/drinks catalog" },
-  manage_sessions: { label: "View Sessions", desc: "Start, end sessions & add snacks / frames" },
-  clear_session: { label: "Clear Session",desc: "Allow staff to permanently clear active sessions and their details"},
-  manage_expenses: { label: "Manage Expenses", desc: "Create, edit expenses, vendors and recurring items" },
-  view_expenses: { label: "View Expenses", desc: "See the expense list and expense reports" },
-  view_revenue: { label: "View Revenue", desc: "See revenue KPIs and payment reports" },
-  view_profit: { label: "View Profit", desc: "See net profit and P&L report" },
+  view_ps5: { label: "View PS5", desc: "See PS5 stations, bookings and live sessions" },
+  manage_ps5: { label: "Manage PS5", desc: "Create/cancel bookings and manage PS5 stations and sessions" },
+  view_memberships: { label: "View Memberships", desc: "See members, packages and membership game records" },
+  manage_memberships: { label: "Manage Memberships", desc: "Create and edit members, packages and membership records" },
+  view_sessions: { label: "View Sessions", desc: "See active and past game sessions" },
+  manage_sessions: { label: "Manage Sessions", desc: "Start, pause, resume, extend and end sessions; add snacks and frames" },
+  clear_session: { label: "Clear Session", desc: "Permanently clear active sessions and their details" },
+  view_snacks: { label: "View Snacks", desc: "See snacks, drinks and categories" },
+  manage_snacks: { label: "Manage Snacks", desc: "Add, edit and delete snacks, drinks and categories" },
+  view_food_orders: { label: "View Food Orders", desc: "See incoming and existing food orders" },
+  manage_food_orders: { label: "Manage Food Orders", desc: "Create, complete, cancel and attach food orders" },
+  view_expenses: { label: "View Expenses", desc: "See expenses, vendors and expense reports" },
+  manage_expenses: { label: "Manage Expenses", desc: "Create, edit and delete expenses, vendors and recurring items" },
+  view_revenue: { label: "View Revenue", desc: "See revenue and payment reports" },
+  view_profit: { label: "View Profit", desc: "See net profit and P&L reports" },
   view_reports: { label: "View Reports", desc: "Access general operational reports" },
+  view_settings: { label: "View Settings", desc: "See club settings and game pricing" },
   manage_users: { label: "Manage Users", desc: "Create, edit and delete team members" },
-  manage_settings: { label: "Manage Settings", desc: "Configure club-wide settings" },
+  manage_settings: { label: "Manage Settings", desc: "Change club-wide settings and game pricing" },
 };
 
 export default function Staff() {
@@ -148,7 +159,19 @@ function PermissionsModal({ user, onClose, onSave }) {
     Object.keys(PERMISSION_LABELS).forEach((k) => { init[k] = !!(user.permissions || {})[k]; });
     return init;
   });
-  const toggle = (k) => setPerms((p) => ({ ...p, [k]: !p[k] }));
+  const manageToView = {
+    manage_tables: "view_tables", manage_ps5: "view_ps5",
+    manage_memberships: "view_memberships", manage_sessions: "view_sessions",
+    manage_snacks: "view_snacks", manage_food_orders: "view_food_orders",
+    manage_expenses: "view_expenses", manage_settings: "view_settings",
+  };
+  const viewToManage = Object.fromEntries(Object.entries(manageToView).map(([manage, view]) => [view, manage]));
+  const toggle = (k) => setPerms((p) => {
+    if (viewToManage[k] && p[viewToManage[k]]) return p;
+    const next = { ...p, [k]: !p[k] };
+    if (manageToView[k] && next[k]) next[manageToView[k]] = true;
+    return next;
+  });
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-4" onClick={onClose}>
@@ -156,17 +179,17 @@ function PermissionsModal({ user, onClose, onSave }) {
         <div className="flex items-center justify-between p-5 border-b border-[#262626]">
           <div>
             <h3 className="text-lg font-bold flex items-center gap-2"><KeyRound className="w-4 h-4 text-green-400" /> {user.name}&apos;s Permissions</h3>
-            <p className="text-xs text-gray-500 mt-1">Toggle what this staff can access.</p>
+            <p className="text-xs text-gray-500 mt-1">View access is enabled by default. Manage access is disabled by default. Enabling Manage also grants View.</p>
           </div>
           <button onClick={onClose} data-testid="close-perms" className="w-8 h-8 rounded-lg hover:bg-[#1c1c1c] flex items-center justify-center"><X className="w-4 h-4" /></button>
         </div>
         <div className="p-5 space-y-2 max-h-[60vh] overflow-y-auto">
           {Object.entries(PERMISSION_LABELS).map(([k, meta]) => (
-            <button key={k} type="button" onClick={() => toggle(k)} data-testid={`perm-toggle-${k}`}
+            <button key={k} type="button" onClick={() => toggle(k)} disabled={!!(viewToManage[k] && perms[viewToManage[k]])} data-testid={`perm-toggle-${k}`}
               className={`w-full flex items-center justify-between p-4 rounded-xl border transition-all text-left ${perms[k] ? "bg-green-700/10 border-green-700/40" : "bg-[#0f0f0f] border-[#262626] hover:border-[#333]"}`}>
               <div className="pr-3">
                 <div className="font-semibold text-sm">{meta.label}</div>
-                <div className="text-xs text-gray-500 mt-0.5">{meta.desc}</div>
+                <div className="text-xs text-gray-500 mt-0.5">{meta.desc}{viewToManage[k] && perms[viewToManage[k]] ? " · Included automatically by Manage" : ""}</div>
               </div>
               <div className={`w-11 h-6 rounded-full flex items-center transition-colors shrink-0 ${perms[k] ? "bg-green-600 justify-end" : "bg-[#262626] justify-start"}`}>
                 <div className="w-5 h-5 rounded-full bg-white shadow flex items-center justify-center mx-0.5">

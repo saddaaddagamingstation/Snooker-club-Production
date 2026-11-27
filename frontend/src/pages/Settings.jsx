@@ -59,7 +59,7 @@ function ToggleSwitch({ checked, onChange, label, disabled = false }) {
 }
 
 export default function Settings() {
-  const { user } = useAuth();
+  const { can } = useAuth();
 
   const [pricing, setPricing] = useState(DEFAULTS);
   const [loading, setLoading] = useState(true);
@@ -82,7 +82,7 @@ export default function Settings() {
     () => readPreference(ALERT_DESKTOP_KEY, false)
   );
 
-  const isAdmin = user?.role === "admin";
+  const canManageSettings = can("manage_settings");
 
   useEffect(() => {
     api.get("/settings/game-pricing")
@@ -221,6 +221,10 @@ export default function Settings() {
     });
 
   const save = async () => {
+    if (!canManageSettings) {
+      toast.error("You do not have permission to change game pricing.");
+      return;
+    }
     setSaving(true);
 
     try {
@@ -327,7 +331,7 @@ export default function Settings() {
           step="1"
           value={value ?? ""}
           onChange={(e) => setValue(path, e.target.value)}
-          disabled={!isAdmin}
+          disabled={!canManageSettings}
           className="w-full h-11 bg-transparent px-2 text-white outline-none disabled:opacity-60"
         />
       </div>
@@ -338,14 +342,6 @@ export default function Settings() {
     return (
       <div className="p-8 text-gray-400">
         Loading settings…
-      </div>
-    );
-  }
-
-  if (!isAdmin) {
-    return (
-      <div className="rounded-xl border border-red-900/40 bg-red-950/20 p-6 text-red-300">
-        Only an admin can change settings.
       </div>
     );
   }
@@ -549,7 +545,7 @@ export default function Settings() {
       </div>
 
       {/* SAVE PRICING */}
-      <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[#292929] bg-[#0b0b0b]/95 px-4 py-3 shadow-[0_-12px_35px_rgba(0,0,0,0.45)] backdrop-blur-md lg:left-56 lg:px-8">
+      {canManageSettings && <div className="fixed inset-x-0 bottom-0 z-30 border-t border-[#292929] bg-[#0b0b0b]/95 px-4 py-3 shadow-[0_-12px_35px_rgba(0,0,0,0.45)] backdrop-blur-md lg:left-56 lg:px-8">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="text-sm font-semibold text-white">
@@ -574,7 +570,7 @@ export default function Settings() {
             </span>
           </button>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }

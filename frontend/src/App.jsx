@@ -46,23 +46,23 @@ export default function App() {
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/tables" element={<Tables />} />
-      <Route path="/sessions" element={<Protected perm="manage_sessions"><Sessions /></Protected>} />
+      <Route path="/sessions" element={<Protected perm="view_sessions"><Sessions /></Protected>} />
       <Route path="/snacks" element={<Snacks />} />
       <Route path="/reports" element={<Protected perm="view_reports"><Reports /></Protected>} />
       <Route path="/expenses" element={<Protected perm="view_expenses"><Expenses /></Protected>} />
       <Route path="/staff" element={<Protected perm="manage_users"><Staff /></Protected>} />
-      <Route path="/settings" element={<Protected perm="manage_settings"><Settings /></Protected>} />
+      <Route path="/settings" element={<Protected perm="view_settings"><Settings /></Protected>} />
       <Route path="/bill/:id" element={<Bill />} />
       <Route path="/food-orders" element={<FoodOrders />} />
     </Route>
-    <Route path="/ps5" element={<Protected perm="manage_sessions"><PS5Layout /></Protected>}>
+    <Route path="/ps5" element={<Protected perm="view_ps5"><PS5Layout /></Protected>}>
       <Route index element={<PS5Overview />} />
       <Route path="bookings" element={<PS5BookingPage />} />
       <Route path="reservations" element={<PS5Reservations />} />
       <Route path="live" element={<PS5LiveSessions />} />
     </Route>
     <Route path="/ps5-bookings" element={<Navigate to="/ps5/bookings" replace />} />
-    <Route path="/memberships" element={<Protected perm="manage_sessions"><MembershipLayout /></Protected>}>
+    <Route path="/memberships" element={<Protected perm="view_memberships"><MembershipLayout /></Protected>}>
       <Route index element={<MembershipOverview />} />
       <Route path="packages" element={<MembershipPackages />} />
       <Route path="members" element={<MembershipMembers />} />
