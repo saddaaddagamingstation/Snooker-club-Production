@@ -487,34 +487,7 @@ export default function Sessions() {
             s.is_paused,
             s.pause_started_at,
           );
-          const rdAmount = (
-            s.rd_selected &&
-            ["snooker", "mini_snooker"].includes(
-              String(s.game_type || "").toLowerCase(),
-            )
-          )
-            ? Number(
-                s.rd_amount ??
-                  s.pricing_snapshot?.rd_price ??
-                  0,
-              )
-            : 0;
-
-          // For timer-based Snooker/Mini Snooker, the backend's table_amount
-          // already includes R.D. (_game_timer_amount adds it). Split it out
-          // for display so the modal shows Table + R.D. without double-counting.
-          const rawTableAmount =
-            s.billing_type === "membership"
-              ? Number(s.membership_extra_player_charge || 0)
-              : s.game_timer_enabled
-                ? Number(s.table_amount || 0)
-                : e.tableAmount;
-
-          const tableAmount =
-            s.game_timer_enabled && rdAmount > 0
-              ? Math.max(0, rawTableAmount - rdAmount)
-              : rawTableAmount;
-
+          const tableAmount = s.billing_type === "membership" ? 0 : (s.game_timer_enabled ? Number(s.table_amount || 0) : e.tableAmount);
           const timerDisplay = s.game_timer_enabled ? formatGameTimer(s) : e.display;
           const timerColor = countdownColor(s);
           const snacksAmount = (s.snacks || []).reduce(
@@ -561,16 +534,16 @@ export default function Sessions() {
                   </div>
                 </div>
               </div>
-              {s.game_timer_enabled && s.game_type !== "ps5" && (
+              {s.game_timer_enabled && (
                 <div className="px-6 pt-3 text-xs text-gray-400">
                   {s.game_type === "pool" ? `Pool fixed packages · 30 min ₹${s.pricing_snapshot?.pool?.package_30 ?? 130} / 60 min ₹${s.pricing_snapshot?.pool?.package_60 ?? 250}` : `₹${s.pricing_snapshot?.[s.game_type]?.extra_minute ?? 5}/min after each initial 30-minute block · R.D. ${s.rd_selected ? `₹${s.rd_amount ?? s.pricing_snapshot?.rd_price ?? 20} included once` : "not selected"}`}
                 </div>
               )}
               {s.billing_type === "membership" && (
                 <div className="px-6 pt-4 text-sm text-gray-300">
-                  <span className="text-green-400 font-semibold">Membership play · {s.membership_player_count || 1} player(s) · extra player fee {inr(s.membership_extra_player_charge || 0)}</span>
+                  <span className="text-green-400 font-semibold">Membership play</span>
                   <span className="mx-2">·</span>
-                  {Math.floor((s.membership_state?.used_seconds_today || 0) / 60)} min used today · {Math.floor((s.membership_state?.remaining_total_seconds || 0) / 3600)}h {Math.floor(((s.membership_state?.remaining_total_seconds || 0) % 3600) / 60)}m package balance
+                  {Math.floor((s.membership_state?.used_seconds_today || 0) / 60)} min used of {s.membership_state?.daily_minutes || 0} min today
                   <span className="mx-2">·</span>
                   Expires {s.membership_state?.expires_at ? new Date(s.membership_state.expires_at).toLocaleDateString("en-IN") : "—"}
                 </div>
@@ -580,10 +553,9 @@ export default function Sessions() {
                 <Stat label="Snacks" value={inr(snacksAmount)} />
                 <Stat label="Est. Bill" value={inr(bill)} accent="green" />
               </div>
-              {String(s.game_type || "").toLowerCase() === "snooker" && (
-                <div className="px-6 pb-4">
-                  <FramesSection
-                    session={s}
+              <div className="px-6 pb-4">
+                <FramesSection
+                  session={s}
                   onOpenEndFrame={async (session, isBilling) => {
                     try {
                       setBillingMode(isBilling);
@@ -620,10 +592,9 @@ export default function Sessions() {
                       );
                     }
                   }}
-                    onStartFrame={(session) => startFrame(session.id)}
-                  />
-                </div>
-              )}
+                  onStartFrame={(session) => startFrame(session.id)}
+                />
+              </div>
               <div className="px-6 pb-4">
                 <div className="text-xs uppercase tracking-wider text-gray-500 font-bold mb-2">
                   Snacks ({s.snacks?.length || 0})
@@ -719,8 +690,8 @@ export default function Sessions() {
       </div>
 
       {timerPromptTarget && (
-        <div className="fixed inset-0 z-[75] bg-black/80 flex items-center justify-center p-4">
-          <div className="w-full max-w-md rounded-2xl border border-amber-500/40 bg-[#141414] p-6 space-y-4">
+        <div className="fixed top-24 right-6 z-[75] w-[min(100%-2rem,28rem)] pointer-events-none sm:right-6 sm:top-24">
+          <div className="w-full rounded-2xl border border-amber-500/40 bg-[#141414] p-5 sm:p-6 space-y-4 shadow-[0_18px_60px_rgba(0,0,0,0.65)] pointer-events-auto">
             <div className="text-xs uppercase tracking-[0.2em] text-amber-400 font-bold">Timer completed</div>
             <h3 className="text-xl font-bold">Table {timerPromptTarget.table_number} · Continue playing?</h3>
             <p className="text-sm text-gray-300">
@@ -1322,31 +1293,11 @@ function EndForm({ session, snapshot, onSubmit }) {
   const m = Math.floor((freezeSecs % 3600) / 60);
   const sec = freezeSecs % 60;
   const frozenDisplay = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  const tableAmount = Number(snapshot?.table_amount ?? 0);
   const snacksAmount = Number(
     snapshot?.snacks_amount ?? session.snacks_amount ?? 0,
   );
-  const normalizedGameType = String(session.game_type || "").toLowerCase();
-  const rdAmount =
-    session.rd_selected &&
-    ["snooker", "mini_snooker"].includes(normalizedGameType)
-      ? Number(
-          snapshot?.rd_amount ??
-            session.rd_amount ??
-            session.pricing_snapshot?.rd_price ??
-            0,
-        )
-      : 0;
-
-  // Timer preview table_amount already includes R.D. from the backend timer
-  // helper. Remove it from the displayed table line before adding the
-  // separate R.D. line below. Non-timer frame billing excludes R.D. already.
-  const rawTableAmount = Number(snapshot?.table_amount ?? 0);
-  const tableAmount =
-    session.game_timer_enabled && rdAmount > 0
-      ? Math.max(0, rawTableAmount - rdAmount)
-      : rawTableAmount;
-
-  const subtotal = tableAmount + snacksAmount + rdAmount - Number(discount || 0);
+  const subtotal = tableAmount + snacksAmount - Number(discount || 0);
   const taxAmount = (subtotal * Number(tax || 0)) / 100;
   const totalExact = subtotal + taxAmount;
   const total = totalExact;
@@ -1414,11 +1365,7 @@ function EndForm({ session, snapshot, onSubmit }) {
           <Stat label="Duration" value={frozenDisplay} />
           <Stat label="Table" value={inr(tableAmount)} />
           <Stat label="Snacks" value={inr(snacksAmount)} />
-          {rdAmount > 0 && <Stat label="R.D." value={inr(rdAmount)} />}
-          <Stat
-            label="Subtotal"
-            value={inr(tableAmount + snacksAmount + rdAmount)}
-          />
+          <Stat label="Subtotal" value={inr(tableAmount + snacksAmount)} />
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>

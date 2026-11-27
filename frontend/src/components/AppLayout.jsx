@@ -25,7 +25,7 @@ import { Suspense } from "react";
 const navItems = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard", perm: null },
   { to: "/tables", icon: Grid3x3, label: "Tables", perm: null },
-  { to: "/ps5-bookings", icon: Gamepad2, label: "PS5 Bookings", perm: "manage_sessions" },
+  { to: "/ps5", icon: Gamepad2, label: "PS5 Management", perm: "manage_sessions" },
   { to: "/memberships", icon: Users, label: "Membership", perm: "manage_sessions" },
   { to: "/sessions", icon: Timer, label: "Sessions", perm: "manage_sessions" },
   { to: "/snacks", icon: UtensilsCrossed, label: "Snacks", perm: null },

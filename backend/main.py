@@ -11,6 +11,7 @@ load_dotenv(ROOT_DIR / '.env')
 import os
 import uuid
 import logging
+import math
 import secrets
 from datetime import date, datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -151,7 +152,7 @@ DEFAULT_GAME_PRICING = {
     "snooker": {"players": {"2": 170, "3": 170, "4": 180, "5": 220, "6": 260}, "extra_minute": 5},
     "mini_snooker": {"players": {"2": 110, "3": 120, "4": 130, "5": 140, "6": 150}, "extra_minute": 5},
     "pool": {"package_30": 130, "package_60": 250},
-    "ps5": {"hourly_rate": None},
+    "ps5": {"hourly_rate": None, "players": {"1": 129, "2": 199, "3": 299, "4": 369}},
     "rd_price": 20,
 }
 
@@ -185,7 +186,10 @@ def _fixed_block_price(game_type: str, player_count: int, duration_minutes: int,
     rates = pricing.get(game_type, {}).get("players", {})
     base = rates.get(str(player_count), rates.get(player_count))
     if base is None:
-        raise HTTPException(status_code=400, detail="Choose 2 to 6 players")
+        raise HTTPException(status_code=400, detail="Choose a valid player count")
+    if game_type == "ps5":
+        # PS5 player rates are hourly prices; fixed blocks are prorated by duration.
+        return round(float(base) * int(duration_minutes) / 60.0, 2)
     extra_rate = float(pricing.get(game_type, {}).get("extra_minute", 5))
     return float(base) + max(0, duration_minutes - 30) * extra_rate
 
@@ -329,16 +333,31 @@ class ResetReq(BaseModel):
 class TableIn(BaseModel):
     table_number: str
     table_name: str
-    hourly_rate: float
+    table_size: Literal["large", "small"] = "large"
+    hourly_rate: float = 0
     status: str = "available"  # available | running | reserved | maintenance
-    game_type: Literal["snooker", "mini_snooker", "pool"] = "snooker"
+
+class PS5StationIn(BaseModel):
+    table_number: str
+    table_name: str
+    status: Literal["available", "maintenance"] = "available"
+
+class PS5BookingCreate(BaseModel):
+    customer_name: str
+    phone: Optional[str] = ""
+    table_id: Optional[str] = None
+    start_at: str
+    end_at: str
+    player_count: int = Field(ge=1, le=4)
+    membership_id: Optional[str] = None
+    notes: Optional[str] = ""
 
 class TableUpdate(BaseModel):
     table_number: Optional[str] = None
     table_name: Optional[str] = None
     hourly_rate: Optional[float] = None
     status: Optional[str] = None
-    game_type: Optional[Literal["snooker", "mini_snooker", "pool"]] = None
+    table_size: Optional[Literal["large", "small"]] = None
 
 class SnackIn(BaseModel):
     name: str
@@ -363,9 +382,11 @@ class SessionStart(BaseModel):
     notes: Optional[str] = ""
     billing_type: Literal["normal", "membership"] = "normal"
     membership_id: Optional[str] = None
+    booking_id: Optional[str] = None
     player_count: Optional[int] = Field(default=2, ge=1, le=6)
     rd_selected: bool = False
     duration_minutes: Optional[int] = Field(default=30, ge=1, le=1440)
+    game_type: Optional[Literal["snooker", "mini_snooker", "pool", "ps5"]] = None
 
 class TimerExtend(BaseModel):
     duration_minutes: int = Field(ge=1, le=1440)
@@ -408,6 +429,7 @@ class FoodOrderCreate(BaseModel):
 
 class FoodOrderAttach(BaseModel):
     table_id: str
+    game_type: Optional[Literal["snooker", "mini_snooker", "pool"]] = None
     player_count: Optional[int] = Field(default=2, ge=2, le=6)
     rd_selected: bool = False
     duration_minutes: Optional[int] = Field(default=30, ge=1, le=1440)
@@ -947,23 +969,258 @@ async def delete_user(user_id: str, user=Depends(require_admin)):
     return {"deleted": res.deleted_count}
 
 # ---- Tables ----
+# ---- PS5 Advance Bookings ----
+def _ps5_parse_datetime(value: str) -> datetime:
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=CLUB_TIMEZONE)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid booking date or time")
+
+
+async def _ps5_station_is_available(table_id: str, start: datetime, end: datetime):
+    active_session = await db.sessions.find_one({"table_id": table_id, "status": "active"})
+    if active_session:
+        return False
+
+    existing = await db.ps5_bookings.find(
+        {"table_id": table_id, "status": "confirmed"}, {"_id": 0}
+    ).to_list(5000)
+    for booking in existing:
+        old_start = _ps5_parse_datetime(booking["start_at"])
+        old_end = _ps5_parse_datetime(booking["end_at"])
+        if start < old_end and end > old_start:
+            return False
+    return True
+
+
+async def _ps5_mark_no_shows(now=None):
+    """Expire unstarted reservations 15 minutes after their scheduled start."""
+    now = now or now_utc()
+    cutoff = iso(now - timedelta(minutes=15))
+    overdue = await db.ps5_bookings.find(
+        {"status": "confirmed", "start_at": {"$lte": cutoff}},
+        {"_id": 0}
+    ).to_list(5000)
+    for booking in overdue:
+        # A session linked to this booking means the customer arrived, even if
+        # the booking status update was interrupted.
+        started = await db.sessions.find_one(
+            {"ps5_booking_id": booking["id"], "status": "active"},
+            {"_id": 1}
+        )
+        if not started:
+            await db.ps5_bookings.update_one(
+                {"id": booking["id"], "status": "confirmed"},
+                {"$set": {"status": "no_show", "no_show_at": iso(now)}}
+            )
+
+
+@api.get("/ps5-bookings")
+async def list_ps5_bookings(user=Depends(require_permission("manage_sessions"))):
+    now = now_utc()
+    await _ps5_mark_no_shows(now)
+    rows = await db.ps5_bookings.find(
+        {"status": {"$in": ["confirmed", "no_show", "started", "completed"]}},
+        {"_id": 0}
+    ).sort("start_at", 1).to_list(5000)
+    return [
+        booking for booking in rows
+        if _ps5_parse_datetime(booking["end_at"]) >= now - timedelta(days=1)
+    ]
+
+
+@api.post("/ps5-bookings")
+async def create_ps5_booking(body: PS5BookingCreate, user=Depends(require_permission("manage_sessions"))):
+    customer_name = body.customer_name.strip()
+    if not customer_name:
+        raise HTTPException(status_code=400, detail="Customer name is required")
+
+    start = _ps5_parse_datetime(body.start_at)
+    end = _ps5_parse_datetime(body.end_at)
+    duration_seconds = (end - start).total_seconds()
+    if duration_seconds not in (1800, 3600, 5400, 7200):
+        raise HTTPException(status_code=400, detail="PS5 bookings must be exactly 30, 60, 90 or 120 minutes")
+    if start < now_utc():
+        raise HTTPException(status_code=400, detail="Cannot create a booking in the past")
+
+    stations = await db.tables.find(
+        {"game_type": "ps5"}, {"_id": 0}
+    ).sort("table_number", 1).to_list(length=None)
+    if not stations:
+        raise HTTPException(status_code=400, detail="No PS5 stations configured")
+
+    pricing = await _get_game_pricing()
+    hourly_rate = (pricing.get("ps5") or {}).get("players", {}).get(str(body.player_count))
+    if hourly_rate is None:
+        raise HTTPException(status_code=400, detail="Invalid PS5 player count or pricing")
+    membership = None
+    if body.membership_id:
+        membership = await db.memberships.find_one(
+            {"id": body.membership_id, "status": "active"}, {"_id": 0}
+        )
+        if not membership:
+            raise HTTPException(status_code=404, detail="Active membership not found")
+        state = await _membership_status(membership, at=start)
+        if state["is_expired"]:
+            raise HTTPException(status_code=400, detail="Membership will be expired at the booking time")
+        if state["remaining_total_seconds"] <= 0:
+            raise HTTPException(status_code=400, detail="Membership has no remaining hours")
+        # A reservation is not a play session: do not consume membership time
+        # or charge extra-player fees until the actual session starts.
+        amount = 0.0
+    else:
+        amount = round(float(hourly_rate) * duration_seconds / 3600, 2)
+
+    selected = None
+    if body.table_id:
+        selected = next((station for station in stations if station["id"] == body.table_id), None)
+        if not selected:
+            raise HTTPException(status_code=404, detail="Selected PS5 station not found")
+        if selected.get("status") in ("maintenance", "running"):
+            raise HTTPException(status_code=409, detail="Selected PS5 station is not available")
+        if not await _ps5_station_is_available(selected["id"], start, end):
+            raise HTTPException(status_code=409, detail="Selected PS5 station already has an overlapping booking or active session")
+    else:
+        for station in stations:
+            if station.get("status") in ("maintenance", "running"):
+                continue
+            if await _ps5_station_is_available(station["id"], start, end):
+                selected = station
+                break
+        if not selected:
+            raise HTTPException(status_code=409, detail="No PS5 station is available for this time")
+
+    now = now_utc()
+    booking = {
+        "id": str(uuid.uuid4()),
+        "customer_name": customer_name,
+        "phone": (body.phone or "").strip(),
+        "table_id": selected["id"],
+        "table_number": selected["table_number"],
+        "table_name": selected.get("table_name", ""),
+        "game_type": "ps5",
+        "start_at": iso(start),
+        "end_at": iso(end),
+        "duration_minutes": int(duration_seconds / 60),
+        "player_count": body.player_count,
+        "hourly_rate": float(hourly_rate),
+        "billing_type": "membership" if membership else "normal",
+        "membership_id": membership["id"] if membership else None,
+        "membership_name": membership.get("member_name") if membership else None,
+        "amount": amount,
+        "payment_due_at_session_end": bool(membership),
+        "notes": (body.notes or "").strip(),
+        "status": "confirmed",
+        "created_at": iso(now),
+        "created_by": user["id"],
+        "created_by_name": user.get("name", ""),
+    }
+    await db.ps5_bookings.insert_one(booking.copy())
+    return booking
+
+
+@api.post("/ps5-bookings/{booking_id}/cancel")
+async def cancel_ps5_booking(booking_id: str, user=Depends(require_permission("manage_sessions"))):
+    booking = await db.ps5_bookings.find_one({"id": booking_id})
+    if not booking:
+        raise HTTPException(status_code=404, detail="PS5 booking not found")
+    if booking.get("status") != "confirmed":
+        raise HTTPException(status_code=400, detail="Booking is already cancelled or completed")
+
+    result = await db.ps5_bookings.update_one(
+        {"id": booking_id, "status": "confirmed"},
+        {"$set": {
+            "status": "cancelled",
+            "cancelled_at": iso(now_utc()),
+            "cancelled_by": user["id"],
+        }}
+    )
+    if result.modified_count == 0:
+        raise HTTPException(status_code=409, detail="Booking was already changed")
+    return {"ok": True, "message": "PS5 booking cancelled"}
+
+
 @api.get("/tables")
 async def list_tables(user=Depends(get_current_user)):
     tables = await db.tables.find({}, {"_id": 0}).sort("table_number", 1).to_list(1000)
+    for table in tables:
+        if table.get("game_type") == "ps5":
+            table["table_size"] = "ps5"
+            table["supported_games"] = ["ps5"]
+        elif not table.get("table_size"):
+            # Backward compatibility for tables created before physical table types.
+            old_game = table.get("game_type", "snooker")
+            table["table_size"] = "small" if old_game in ("pool", "mini_snooker") else "large"
+            table["supported_games"] = ["pool", "mini_snooker"] if table["table_size"] == "small" else ["snooker"]
     return tables
 
 @api.post("/tables")
 async def create_table(body: TableIn, user=Depends(require_permission("manage_tables"))):
-    t = {"id": str(uuid.uuid4()), **body.model_dump(), "created_at": iso(now_utc())}
+    table_number = body.table_number.strip()
+    table_name = body.table_name.strip()
+    if not table_number or not table_name:
+        raise HTTPException(status_code=400, detail="Table number and name are required")
+    duplicate = await db.tables.find_one({"table_number": {"$regex": f"^{__import__('re').escape(table_number)}$", "$options": "i"}}, {"_id": 1})
+    if duplicate:
+        raise HTTPException(status_code=409, detail="A table or PS5 station with this number already exists")
+    t = {
+        "id": str(uuid.uuid4()), "table_number": table_number, "table_name": table_name,
+        "table_size": body.table_size, "supported_games": ["snooker"] if body.table_size == "large" else ["pool", "mini_snooker"],
+        "hourly_rate": 0.0, "status": body.status, "created_at": iso(now_utc()),
+    }
     await db.tables.insert_one(t.copy())
     return {k: v for k, v in t.items() if k != "_id"}
+
+@api.post("/ps5-stations")
+async def create_ps5_station(body: PS5StationIn, user=Depends(require_permission("manage_tables"))):
+    table_number = body.table_number.strip()
+    table_name = body.table_name.strip()
+
+    if not table_number or not table_name:
+        raise HTTPException(status_code=400, detail="Station number and name are required")
+
+    # Station numbers must be unique across all tables and PS5 stations.
+    existing_numbers = await db.tables.find(
+        {}, {"_id": 0, "table_number": 1}
+    ).to_list(length=None)
+
+    if any(
+        (row.get("table_number") or "").strip().casefold() == table_number.casefold()
+        for row in existing_numbers
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="A table or PS5 station with this number already exists"
+        )
+
+    station = {
+        "id": str(uuid.uuid4()),
+        "table_number": table_number,
+        "table_name": table_name,
+        "hourly_rate": 0.0,
+        "status": body.status,
+        "game_type": "ps5",
+        "created_at": iso(now_utc()),
+    }
+    await db.tables.insert_one(station.copy())
+    return station
 
 @api.put("/tables/{table_id}")
 async def update_table(table_id: str, body: TableUpdate, user=Depends(require_permission("manage_tables"))):
     update = {k: v for k, v in body.model_dump().items() if v is not None}
     if not update:
         raise HTTPException(status_code=400, detail="No fields to update")
-    res = await db.tables.update_one({"id": table_id}, {"$set": update})
+    existing = await db.tables.find_one({"id": table_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Table not found")
+    if existing.get("game_type") == "ps5":
+        raise HTTPException(status_code=400, detail="PS5 stations are managed separately")
+    if "table_size" in update:
+        update["supported_games"] = ["snooker"] if update["table_size"] == "large" else ["pool", "mini_snooker"]
+    res = await db.tables.update_one({"id": table_id}, {"$set": update, "$unset": {"game_type": ""}})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Table not found")
     t = await db.tables.find_one({"id": table_id}, {"_id": 0})
@@ -971,6 +1228,24 @@ async def update_table(table_id: str, body: TableUpdate, user=Depends(require_pe
 
 @api.delete("/tables/{table_id}")
 async def delete_table(table_id: str, user=Depends(require_permission("manage_tables"))):
+    table = await db.tables.find_one({"id": table_id}, {"_id": 0})
+    if not table:
+        raise HTTPException(status_code=404, detail="Table not found")
+
+    if table.get("game_type") == "ps5":
+        active_session = await db.sessions.find_one(
+            {"table_id": table_id, "status": "active"}, {"_id": 1}
+        )
+        if active_session:
+            raise HTTPException(status_code=409, detail="Cannot delete a PS5 station with an active session")
+        future_booking = await db.ps5_bookings.find_one({
+            "table_id": table_id,
+            "status": "confirmed",
+            "end_at": {"$gt": iso(now_utc())},
+        }, {"_id": 1})
+        if future_booking:
+            raise HTTPException(status_code=409, detail="Cancel its future confirmed bookings before deleting this PS5 station")
+
     res = await db.tables.delete_one({"id": table_id})
     return {"deleted": res.deleted_count}
 
@@ -1420,6 +1695,7 @@ async def start_table_from_food_order(
     session = await start_session(
         SessionStart(
             table_id=body.table_id,
+            game_type=body.game_type,
             customer_name=order.get("customer_name", ""),
             notes="",
             player_count=body.player_count,
@@ -1698,23 +1974,36 @@ async def create_membership(body: MembershipCreate, user=Depends(require_permiss
 
 
 # ---- Membership administration ----
+
 async def _ensure_membership_packages():
     now = iso(now_utc())
+
     plans = [
         ("Bronze", 1099, 10),
         ("Silver", 2199, 20),
         ("Gold", 3199, 30),
         ("Platinum", 4199, 40),
     ]
+
     for name, price, hours in plans:
         await db.membership_packages.update_one(
             {"name": {"$regex": f"^{name}$", "$options": "i"}},
-            {"$set": {"name": name, "price": price, "total_hours": hours,
-                      "daily_minutes": 120, "description": f"{hours} total hours · max 2 hours/day · valid 30 days",
-                      "is_active": True, "updated_at": now},
-             "$setOnInsert": {"id": str(uuid.uuid4()), "created_at": now}},
+            {
+                "$setOnInsert": {
+                    "id": str(uuid.uuid4()),
+                    "name": name,
+                    "price": price,
+                    "total_hours": hours,
+                    "daily_minutes": 120,
+                    "description": f"{hours} total hours · max 2 hours/day · valid 30 days",
+                    "is_active": True,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            },
             upsert=True,
         )
+
 
 
 @api.get("/membership-admin/overview")
@@ -1732,9 +2021,16 @@ async def membership_admin_overview(user=Depends(require_permission("manage_sess
             "monthly_collection": round(collected, 2), "recent_members": recent, "expiring_soon": expiring}
 
 @api.get("/membership-admin/packages")
-async def membership_packages(user=Depends(require_permission("manage_sessions"))):
+async def membership_packages(
+    user=Depends(require_permission("manage_sessions"))
+):
     await _ensure_membership_packages()
-    return await db.membership_packages.find({"name": {"$in": ["Bronze", "Silver", "Gold", "Platinum"]}}, {"_id": 0}).sort("price", 1).to_list(4)
+
+    return await db.membership_packages.find(
+        {},
+        {"_id": 0}
+    ).sort("created_at", -1).to_list(500)
+
 
 @api.post("/membership-admin/packages")
 async def create_membership_package(body: MembershipPackageIn, user=Depends(require_permission("manage_sessions"))):
@@ -2128,6 +2424,83 @@ async def membership_game_records(
 
     return output
 
+# ---- Persistent pre-expiry timer alerts (shared Snooker/PS5 behavior) ----
+_timer_alert_task = None
+
+
+def _timer_alert_remaining(session, segment, now):
+    duration = int(segment.get("duration_seconds") or int(segment.get("duration_minutes") or 0) * 60)
+    if duration <= 0:
+        return None, None
+    elapsed = float(segment.get("played_seconds", 0) or 0)
+    if segment.get("started_at") and not session.get("is_paused"):
+        elapsed += _dt_seconds_since(segment.get("started_at"), now)
+    remaining = max(0, int(math.ceil(duration - elapsed)))
+    threshold = min(duration * 0.25, 10 * 60)
+    return remaining, threshold
+
+
+async def _scan_timer_alerts_once():
+    now = now_utc()
+    cursor = db.sessions.find(
+        {"status": "active", "game_timer_enabled": True, "timer_mode": {"$in": ["countdown", "awaiting_decision"]}},
+        {"_id": 0, "id": 1, "game_type": 1, "table_number": 1, "current_frame": 1, "is_paused": 1, "game_billing_segments": 1}
+    )
+    async for session in cursor:
+        segments = session.get("game_billing_segments") or []
+        segment = next((x for x in reversed(segments) if x.get("kind") == "fixed"), None)
+        if not segment or not segment.get("id"):
+            continue
+        remaining, threshold = _timer_alert_remaining(session, segment, now)
+        if remaining is None or remaining > threshold:
+            continue
+        frame = session.get("current_frame") or {}
+        alert = {
+            "id": str(uuid.uuid4()), "timer_block_id": segment["id"],
+            "session_id": session["id"],
+            "game_type": "PS5" if (session.get("game_type") or "").lower() == "ps5" else (session.get("game_type") or "snooker").replace("_", " ").title(),
+            "table_number": session.get("table_number") or "Unknown",
+            "remaining_seconds": remaining,
+            "remaining_display": f"{remaining // 60:02d}:{remaining % 60:02d}",
+            "frame_number": frame.get("frame_number", "Unavailable"),
+            "message": "Please inform the customer.", "created_at": iso(now),
+        }
+        try:
+            await db.timer_alerts.insert_one(alert)
+        except DuplicateKeyError:
+            continue
+
+
+async def _timer_alert_worker():
+    while True:
+        try:
+            await _scan_timer_alerts_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Timer alert scan failed")
+        await asyncio.sleep(1)
+
+
+@api.get("/timer-alerts/pending")
+async def pending_timer_alerts(user=Depends(get_current_user)):
+    delivered = await db.timer_alert_deliveries.find({"user_id": user["id"]}, {"_id": 0, "alert_id": 1}).to_list(5000)
+    delivered_ids = [x["alert_id"] for x in delivered]
+    return await db.timer_alerts.find({"id": {"$nin": delivered_ids}}, {"_id": 0}).sort("created_at", 1).to_list(100)
+
+
+@api.post("/timer-alerts/{alert_id}/claim")
+async def claim_timer_alert(alert_id: str, user=Depends(get_current_user)):
+    alert = await db.timer_alerts.find_one({"id": alert_id}, {"_id": 0})
+    if not alert:
+        raise HTTPException(status_code=404, detail="Timer alert not found")
+    try:
+        await db.timer_alert_deliveries.insert_one({"alert_id": alert_id, "user_id": user["id"], "claimed_at": iso(now_utc())})
+    except DuplicateKeyError:
+        return {"claimed": False, "alert": None}
+    return {"claimed": True, "alert": alert}
+
+
 @api.get("/sessions/active")
 async def active_sessions(user=Depends(get_current_user)):
     rows = await db.sessions.find(
@@ -2343,15 +2716,56 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         raise HTTPException(status_code=404, detail="Table not found")
     if table["status"] != "available":
         raise HTTPException(status_code=400, detail=f"Table is {table['status']}")
-    game_type = _game_type(table)
+    is_ps5_table = table.get("game_type") == "ps5"
+    if is_ps5_table:
+        game_type = "ps5"
+    else:
+        table_size = table.get("table_size") or ("small" if table.get("game_type") in ("pool", "mini_snooker") else "large")
+        supported_games = table.get("supported_games") or (["pool", "mini_snooker"] if table_size == "small" else ["snooker"])
+        game_type = body.game_type or ("snooker" if table_size == "large" else "pool")
+        if game_type not in supported_games:
+            raise HTTPException(status_code=400, detail=f"{game_type.replace('_', ' ').title()} is not supported on this table")
+    linked_booking = None
+    if game_type == "ps5":
+        await _ps5_mark_no_shows()
+        if body.booking_id:
+            linked_booking = await db.ps5_bookings.find_one(
+                {"id": body.booking_id, "status": "confirmed", "table_id": table["id"]},
+                {"_id": 0}
+            )
+            if not linked_booking:
+                raise HTTPException(status_code=404, detail="Confirmed PS5 booking not found for this station")
+            # Early starts are allowed. Starting the booked session consumes
+            # membership only from this actual start timestamp.
+            body.duration_minutes = int(linked_booking.get("duration_minutes") or body.duration_minutes or 60)
+            if linked_booking.get("membership_id"):
+                if body.billing_type != "membership":
+                    raise HTTPException(status_code=400, detail="This reservation is linked to a membership")
+                if body.membership_id and body.membership_id != linked_booking["membership_id"]:
+                    raise HTTPException(status_code=400, detail="Selected membership does not match this booking")
+                body.membership_id = linked_booking["membership_id"]
+        else:
+            # Do not let an unreserved walk-in consume a station promised to a
+            # future customer. A booking can be started early only via booking_id.
+            future = await db.ps5_bookings.find_one({
+                "table_id": table["id"], "status": "confirmed",
+                "start_at": {"$gt": iso(now_utc())}
+            }, {"_id": 0})
+            if future:
+                raise HTTPException(status_code=409, detail="This PS5 station has a future reservation. Start that booking or choose another station.")
     pricing = await _get_game_pricing()
-    game_timer_enabled = body.billing_type == "normal" and game_type in ("snooker", "mini_snooker", "pool")
+    game_timer_enabled = body.billing_type == "normal" and game_type in ("snooker", "mini_snooker", "pool", "ps5")
     if game_timer_enabled:
         duration = int(body.duration_minutes or 30)
         if game_type == "pool" and duration not in (30, 60):
             raise HTTPException(status_code=400, detail="Pool packages are 30 or 60 minutes")
         if game_type in ("snooker", "mini_snooker") and not 2 <= int(body.player_count or 0) <= 6:
             raise HTTPException(status_code=400, detail="Choose 2 to 6 players")
+        if game_type == "ps5":
+            if duration not in (30, 60, 90, 120):
+                raise HTTPException(status_code=400, detail="PS5 sessions must be 30, 60, 90 or 120 minutes")
+            if not 1 <= int(body.player_count or 1) <= 4:
+                raise HTTPException(status_code=400, detail="PS5 supports 1 to 4 players")
     membership = None
     if body.billing_type == "membership":
         if game_type != "ps5":
@@ -2381,6 +2795,7 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "notes": body.notes or "",
         "billing_type": body.billing_type,
         "membership_id": body.membership_id if body.billing_type == "membership" else None,
+        "ps5_booking_id": linked_booking["id"] if linked_booking else None,
         "membership_plan": membership.get("plan") if membership else None,
         "membership_player_count": int(body.player_count or 1) if membership else None,
         "membership_extra_player_charge": membership_player_charge,
@@ -2392,11 +2807,11 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "pause_started_at": None,
         "paused_seconds": 0,
         "pause_reason": None,
-        "duration_minutes": 0,
-        "rate_used": float((pricing["ps5"].get("hourly_rate") if pricing["ps5"].get("hourly_rate") is not None else table["hourly_rate"]) if game_type == "ps5" and body.billing_type == "normal" else table["hourly_rate"]),
+        "duration_minutes": duration if game_timer_enabled else 0,
+        "rate_used": float((pricing["ps5"].get("hourly_rate") if pricing["ps5"].get("hourly_rate") is not None else table.get("hourly_rate", 0)) if game_type == "ps5" and body.billing_type == "normal" else table.get("hourly_rate", 0)),
         "game_type": game_type,
         "game_timer_enabled": game_timer_enabled,
-        "player_count": int(body.player_count or 2) if game_type in ("snooker", "mini_snooker") else None,
+        "player_count": int(body.player_count or (1 if game_type == "ps5" else 2)) if game_type in ("snooker", "mini_snooker", "ps5") else None,
         "rd_selected": bool(body.rd_selected) if game_type in ("snooker", "mini_snooker") else False,
         "rd_amount": float(pricing["rd_price"]) if (game_type in ("snooker", "mini_snooker") and body.rd_selected) else 0.0,
         "pricing_snapshot": pricing,
@@ -2434,6 +2849,11 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         "payment_notes": "",
     }
     await db.sessions.insert_one(session.copy())
+    if linked_booking:
+        await db.ps5_bookings.update_one(
+            {"id": linked_booking["id"], "status": "confirmed"},
+            {"$set": {"status": "started", "started_at": iso(now_utc()), "session_id": session["id"]}}
+        )
     await db.tables.update_one({"id": table["id"]}, {"$set": {"status": "running"}})
     session.pop("_id", None)
     session["table"] = table
@@ -2447,8 +2867,8 @@ async def continue_game_timer(session_id: str, user=Depends(require_permission("
     s = await _sync_game_timer(s, now_utc())
     if s.get("timer_mode") != "awaiting_decision":
         raise HTTPException(status_code=409, detail="The current timer has not expired")
-    if _game_type(s) == "pool":
-        raise HTTPException(status_code=400, detail="Pool uses fixed 30 or 60 minute packages")
+    if _game_type(s) in ("pool", "ps5"):
+        raise HTTPException(status_code=400, detail="This game uses fixed timer extensions. Choose a new block or end the session.")
     now = now_utc()
     segments = list(s.get("game_billing_segments", []))
     pricing = s.get("pricing_snapshot") or await _get_game_pricing()
@@ -2469,6 +2889,8 @@ async def extend_game_timer(session_id: str, body: TimerExtend, user=Depends(req
     game_type = _game_type(s)
     if game_type == "pool" and duration not in (30, 60):
         raise HTTPException(status_code=400, detail="Pool packages are 30 or 60 minutes")
+    if game_type == "ps5" and duration != 30:
+        raise HTTPException(status_code=400, detail="PS5 extensions are fixed 30-minute blocks")
     if game_type in ("snooker", "mini_snooker") and duration not in (30, 60):
         raise HTTPException(status_code=400, detail="Choose a 30 or 60 minute extension")
     now = now_utc()
@@ -3070,6 +3492,11 @@ async def end_session(session_id: str, body: SessionEnd, user=Depends(require_pe
             for payment in payment_docs
         ],
     )
+    if s.get("ps5_booking_id"):
+        await db.ps5_bookings.update_one(
+            {"id": s["ps5_booking_id"], "status": "started"},
+            {"$set": {"status": "completed", "completed_at": iso(end)}}
+        )
     s = await db.sessions.find_one(
         {"id": session_id},
         {"_id": 0}
@@ -3301,17 +3728,27 @@ async def timed_dashboard_query(name, operation):
 @api.get("/dashboard/stats")
 async def dashboard_stats(user=Depends(get_current_user)):
     today_start, today_end = local_day_range()
-    tables, active, completed_today, food_orders_today, membership_payments_today = await asyncio.gather(
+    tables, active_table_sessions, active_ps5_sessions, completed_today, food_orders_today, membership_payments_today = await asyncio.gather(
         timed_dashboard_query(
             "tables",
             db.tables.find(
                 {},
-                {"_id": 0, "status": 1}
+                {"_id": 0, "status": 1, "game_type": 1, "table_size": 1}
             ).to_list(1000),
         ),
         timed_dashboard_query(
-            "active_sessions",
-            db.sessions.count_documents({"status": "active"}),
+            "active_table_sessions",
+            db.sessions.count_documents({
+                "status": "active",
+                "game_type": {"$ne": "ps5"},
+            }),
+        ),
+        timed_dashboard_query(
+            "active_ps5_sessions",
+            db.sessions.count_documents({
+                "status": "active",
+                "game_type": "ps5",
+            }),
         ),
         timed_dashboard_query(
             "completed_sessions_today",
@@ -3359,15 +3796,12 @@ async def dashboard_stats(user=Depends(get_current_user)):
         for s in completed_today
     ),2)
 
-    available = sum(
-        1 for t in tables
-        if t["status"] == "available"
-    )
+    regular_tables = [t for t in tables if t.get("game_type") != "ps5"]
+    ps5_stations = [t for t in tables if t.get("game_type") == "ps5"]
 
-    occupied = sum(
-        1 for t in tables
-        if t["status"] == "running"
-    )
+    available = sum(1 for t in regular_tables if t.get("status") == "available")
+    occupied = sum(1 for t in regular_tables if t.get("status") == "running")
+    available_ps5 = sum(1 for t in ps5_stations if t.get("status") == "available")
 
     food_only_snacks_revenue = round(
         sum(
@@ -3399,16 +3833,20 @@ async def dashboard_stats(user=Depends(get_current_user)):
         ) + food_only_snacks_revenue,
         2
     )
-    today_sessions = len(completed_today) + active
+    today_sessions = len(completed_today) + active_table_sessions + active_ps5_sessions
     return {
         "today_revenue": today_revenue,
         "membership_revenue": membership_revenue_today,
-        "active_sessions": active,
+        "active_sessions": active_table_sessions + active_ps5_sessions,
+        "active_table_sessions": active_table_sessions,
+        "active_ps5_sessions": active_ps5_sessions,
         "available_tables": available,
         "occupied_tables": occupied,
+        "available_ps5": available_ps5,
         "snacks_revenue": today_snacks_revenue,
         "today_sessions": today_sessions,
-        "total_tables": len(tables),
+        "total_tables": len(regular_tables),
+        "total_ps5": len(ps5_stations),
     }
 
 @api.get("/dashboard/charts")
@@ -4940,11 +5378,37 @@ async def seed():
         await db.tables.insert_many(defaults)
         logger.info("Seeded default tables")
 
+_ps5_no_show_task = None
+
+async def _ps5_no_show_worker():
+    while True:
+        try:
+            await _ps5_mark_no_shows()
+        except Exception:
+            logger.exception("PS5 no-show worker failed")
+        await asyncio.sleep(30)
+
+
 @app.on_event("startup")
 async def on_startup():
+    global _ps5_no_show_task, _timer_alert_task
     await seed()
     await ensure_performance_indexes()
+    await db.timer_alerts.create_index("timer_block_id", unique=True)
+    await db.timer_alerts.create_index("created_at")
+    await db.timer_alert_deliveries.create_index([("alert_id", 1), ("user_id", 1)], unique=True)
+    _ps5_no_show_task = asyncio.create_task(_ps5_no_show_worker())
+    _timer_alert_task = asyncio.create_task(_timer_alert_worker())
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    global _ps5_no_show_task, _timer_alert_task
+    for task in (_ps5_no_show_task, _timer_alert_task):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     client.close()

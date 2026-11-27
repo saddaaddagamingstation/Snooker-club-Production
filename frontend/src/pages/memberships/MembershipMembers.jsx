@@ -45,6 +45,7 @@ const PhoneNumberField = ({ value, onChange, required = true }) => (
 );
 
 const getMembershipStatus = (m) => {
+  if (m.status === "inactive") return "inactive";
   if (m.is_expired) return "expired";
 
   if (!m.expires_at) return "active";
@@ -86,7 +87,9 @@ export default function MembershipMembers() {
         api.get("/membership-admin/packages"),
       ]);
 
-      setMembers(m.data || []);
+      // Deactivated members are kept in MongoDB for historical game records,
+      // but removed from the active member directory.
+      setMembers((m.data || []).filter((member) => member.status !== "inactive"));
       setPackages((p.data || []).filter((x) => x.is_active));
 
       if (!form.package_id && p.data?.length) {
@@ -159,7 +162,7 @@ export default function MembershipMembers() {
   const deleteMember = async (m) => {
     if (
       !window.confirm(
-        `Deactivate membership of ${m.member_name}? Their historical records will be preserved.`,
+        `Remove ${m.member_name} from the member directory? Historical game records will be preserved.`,
       )
     )
       return;
@@ -167,8 +170,8 @@ export default function MembershipMembers() {
     try {
       await api.delete(`/membership-admin/members/${m.id}`);
 
-      toast.success("Member deactivated successfully");
-      load();
+      setMembers((current) => current.filter((member) => member.id !== m.id));
+      toast.success("Member removed from the directory. Historical records are preserved.");
     } catch (e) {
       toast.error(formatApiErrorDetail(e.response?.data?.detail));
     }
@@ -470,6 +473,7 @@ export default function MembershipMembers() {
                 "Start Date",
                 "End Date",
                 "Daily Limit",
+                "Credit Left",
                 "Status",
                 "Actions",
               ].map((x) => (
@@ -508,7 +512,9 @@ export default function MembershipMembers() {
                       : "—"}
                   </td>
 
-                  <td className="p-3">{Math.floor((m.remaining_total_seconds || 0) / 3600)}h {Math.floor(((m.remaining_total_seconds || 0) % 3600) / 60)}m left</td>
+                  <td className="p-3">{Math.floor(Number(m.daily_minutes ?? 120) / 60)}h/day</td>
+
+                  <td className="p-3">{Math.floor((m.remaining_total_seconds || 0) / 3600)}h {Math.floor(((m.remaining_total_seconds || 0) % 3600) / 60)}m</td>
 
                   <td className="p-3">
                     <span
@@ -539,7 +545,7 @@ export default function MembershipMembers() {
 
                       <button
                         onClick={() => deleteMember(m)}
-                        title="Deactivate member"
+                        title="Remove member"
                         className="p-2 rounded-lg bg-[#262626] hover:bg-red-900/40 text-red-400"
                       >
                         <Trash2 className="w-4 h-4" />

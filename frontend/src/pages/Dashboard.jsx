@@ -13,6 +13,7 @@ import {
   Coffee,
   Trophy,
   Play,
+  Gamepad2,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -197,12 +198,21 @@ export default function Dashboard() {
           </button>
 
           <Link
-            to="/tables"
+            to="/tables?type=tables"
             className="px-5 h-12 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center gap-2 transition-all"
             data-testid="quick-start-table-btn"
           >
             <Play className="w-4 h-4" />
             Start Table
+          </Link>
+
+          <Link
+            to="/tables?type=ps5"
+            className="px-5 h-12 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-semibold flex items-center gap-2 transition-all"
+            data-testid="quick-start-ps5-btn"
+          >
+            <Gamepad2 className="w-4 h-4" />
+            Start PS5
           </Link>
 
           <Link
@@ -223,18 +233,18 @@ export default function Dashboard() {
           </div>
         )}
         <StatCard
-          icon={Activity}
-          label="Active Sessions"
-          value={stats?.active_sessions ?? "—"}
-          accent="amber"
-          hint="Currently running"
-        />
-        <StatCard
           icon={Layers}
           label="Available Tables"
           value={stats?.available_tables ?? "—"}
           accent="green"
           hint={`of ${stats?.total_tables ?? 0} tables`}
+        />
+        <StatCard
+          icon={Layers}
+          label="Available PS5"
+          value={stats?.available_ps5 ?? "—"}
+          accent="blue"
+          hint={`of ${stats?.total_ps5 ?? 0} PS5 stations`}
         />
         {showRevenue && (
           <StatCard

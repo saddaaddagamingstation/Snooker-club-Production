@@ -114,12 +114,20 @@ export default function Tables() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [gameFilter, setGameFilter] = useState("all");
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const foodOrderId = searchParams.get("food_order");
   const [modal, setModal] = useState(null); // regular table create/edit
   const [ps5Modal, setPs5Modal] = useState(false);
   const [startModal, setStartModal] = useState(null); // table object
   useTimer();
+
+  // Dashboard shortcuts open this page with the relevant inventory pre-filtered.
+  useEffect(() => {
+    const requestedType = searchParams.get("type");
+    if (requestedType === "tables" || requestedType === "ps5") {
+      setGameFilter(requestedType);
+    }
+  }, [searchParams]);
 
   const load = async () => {
     const [t, s, p] = await Promise.all([
@@ -146,7 +154,10 @@ export default function Tables() {
         .toLowerCase()
         .includes(search.toLowerCase());
     const matchFilter = filter === "all" || t.status === filter;
-    const matchGame = gameFilter === "all" || String(t.game_type || "snooker").toLowerCase() === gameFilter;
+    const isPs5 = t.game_type === "ps5" || t.table_size === "ps5";
+    const matchGame =
+      gameFilter === "all" ||
+      (gameFilter === "ps5" ? isPs5 : gameFilter === "tables" ? !isPs5 : true);
     return matchSearch && matchFilter && matchGame;
   });
 
@@ -154,16 +165,17 @@ export default function Tables() {
     try {
       if (modal?.edit) {
         await api.put(`/tables/${modal.edit.id}`, {
-          ...form,
-          hourly_rate: Number(form.hourly_rate ?? 300),
-          game_type: form.game_type || "snooker",
+          table_number: form.table_number.trim(),
+          table_name: form.table_name.trim(),
+          table_size: form.table_size || (["pool", "mini_snooker"].includes(form.game_type) ? "small" : "large"),
         });
         toast.success("Table updated");
       } else {
         await api.post("/tables", {
-          ...form,
-          hourly_rate: Number(form.hourly_rate || 300),
-          game_type: form.game_type || "snooker",
+          table_number: form.table_number.trim(),
+          table_name: form.table_name.trim(),
+          table_size: form.table_size || "large",
+          status: form.status || "available",
         });
         toast.success("Table added");
       }
@@ -212,6 +224,7 @@ export default function Tables() {
             player_count: Number(form.player_count || 2),
             rd_selected: Boolean(form.rd_selected),
             duration_minutes: Number(form.duration_minutes || 30),
+            game_type: form.game_type,
           },
         );
 
@@ -222,12 +235,9 @@ export default function Tables() {
         const response = await api.post("/sessions/start", {
           table_id: startModal.id,
           customer_name: form.customer_name,
-          billing_type: String(startModal?.game_type || "snooker").toLowerCase() === "ps5"
-            ? (form.billing_type || "normal")
-            : "normal",
-          membership_id: String(startModal?.game_type || "snooker").toLowerCase() === "ps5" && form.billing_type === "membership"
-            ? form.membership_id
-            : null,
+          game_type: form.game_type,
+          billing_type: startModal?.game_type === "ps5" ? (form.billing_type || "normal") : "normal",
+          membership_id: startModal?.game_type === "ps5" && form.billing_type === "membership" ? form.membership_id : null,
           player_count: Number(form.player_count || (form.billing_type === "membership" ? 1 : 2)),
           rd_selected: Boolean(form.rd_selected),
           duration_minutes: Number(form.duration_minutes || 30),
@@ -270,9 +280,8 @@ export default function Tables() {
                   form: {
                     table_number: "",
                     table_name: "",
-                    hourly_rate: 300,
                     status: "available",
-                    game_type: "snooker",
+                    table_size: "large",
                   },
                 })
               }
@@ -312,11 +321,9 @@ export default function Tables() {
               onChange={(e) => setGameFilter(e.target.value)}
               className="h-11 min-w-[150px] appearance-none rounded-lg border border-[#262626] bg-[#141414] pl-3 pr-9 text-sm font-medium text-white outline-none transition-colors focus:border-green-600"
             >
-              <option value="all">All Games</option>
-              <option value="snooker">Snooker</option>
-              <option value="mini_snooker">Mini Snooker</option>
+              <option value="all">All</option>
+              <option value="tables">Tables</option>
               <option value="ps5">PS5</option>
-              <option value="pool">Pool</option>
             </select>
             <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
           </label>
@@ -376,7 +383,7 @@ export default function Tables() {
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="text-xs uppercase tracking-[0.2em] text-gray-500 font-bold">
-                      {t.table_name} · {(t.game_type || "snooker").replaceAll("_", " ")}
+                      {t.table_name} · {t.game_type === "ps5" ? "PS5 Station" : `${(t.table_size || (["pool", "mini_snooker"].includes(t.game_type) ? "small" : "large")) === "small" ? "Small" : "Large"} Table` }
                     </div>
                     <div className="text-3xl font-bold mt-1 font-mono">
                       {t.table_number}
@@ -420,25 +427,11 @@ export default function Tables() {
                   </div>
                 ) : (
                   <div className="mt-4">
-                    <div className="text-xs uppercase tracking-wider text-gray-500">
-                      {(t.game_type || "snooker") === "pool" ? "Fixed Packages" : "Starting 30-Minute Rate"}
+                    <div className="text-xs uppercase tracking-wider text-gray-500">Supported Games</div>
+                    <div className="text-sm font-semibold text-green-400 mt-2">
+                      {(t.supported_games || (t.game_type === "ps5" ? ["ps5"] : (t.table_size === "small" || ["pool", "mini_snooker"].includes(t.game_type) ? ["pool", "mini_snooker"] : ["snooker"]))).map((g) => g.replaceAll("_", " ").toUpperCase()).join(" · ")}
                     </div>
-                    <div className="text-xl font-bold font-mono text-green-400 mt-1">
-                      {(t.game_type || "snooker") === "ps5"
-                        ? `₹${Math.min(...[1, 2, 3, 4].map((n) => Number(pricing?.ps5?.players?.[String(n)] ?? ({ 1: 129, 2: 199, 3: 299, 4: 369 }[n]))))}–₹${Math.max(...[1, 2, 3, 4].map((n) => Number(pricing?.ps5?.players?.[String(n)] ?? ({ 1: 129, 2: 199, 3: 299, 4: 369 }[n]))))} / hour`
-                        : (t.game_type || "snooker") === "pool"
-                          ? `₹${pricing?.pool?.package_30 ?? 130} / ₹${pricing?.pool?.package_60 ?? 250}`
-                          : (t.game_type || "snooker") === "mini_snooker"
-                            ? `From ₹${pricing?.mini_snooker?.players?.["2"] ?? 110}`
-                            : `From ₹${pricing?.snooker?.players?.["2"] ?? 170}`}
-                    </div>
-                    <div className="text-xs text-gray-500 mt-1">
-                      {(t.game_type || "snooker") === "ps5"
-                        ? "Hourly rate depends on player count"
-                        : (t.game_type || "snooker") === "pool"
-                          ? "30 min / 60 min"
-                          : "Depends on player count"}
-                    </div>
+                    <div className="text-xs text-gray-500 mt-1">Game and pricing are selected when a session starts</div>
                   </div>
                 )}
                 <div className="mt-4 flex gap-2">
@@ -461,13 +454,15 @@ export default function Tables() {
                   )}
                   {isAdmin && (
                     <>
-                      <button
-                        data-testid={`edit-table-${t.table_number}`}
-                        onClick={() => setModal({ edit: t, form: t })}
-                        className="h-10 w-10 rounded-lg bg-[#1c1c1c] border border-[#262626] text-gray-300 hover:text-white flex items-center justify-center"
-                      >
-                        <Pencil className="w-4 h-4" />
-                      </button>
+                      {t.game_type !== "ps5" && (
+                        <button
+                          data-testid={`edit-table-${t.table_number}`}
+                          onClick={() => setModal({ edit: t, form: t })}
+                          className="h-10 w-10 rounded-lg bg-[#1c1c1c] border border-[#262626] text-gray-300 hover:text-white flex items-center justify-center"
+                        >
+                          <Pencil className="w-4 h-4" />
+                        </button>
+                      )}
                       <button
                         data-testid={`delete-table-${t.table_number}`}
                         onClick={() => remove(t.id)}
@@ -570,17 +565,15 @@ function TableForm({ initial, onSubmit }) {
           className="form-input"
         />
       </Field>
-      <Field label="Game Type">
+      <Field label="Physical Table Type">
         <select
-          value={f.game_type || "snooker"}
-          onChange={(e) => setF({ ...f, game_type: e.target.value })}
-          data-testid="form-game-type"
+          value={f.table_size || (["pool", "mini_snooker"].includes(f.game_type) ? "small" : "large")}
+          onChange={(e) => setF({ ...f, table_size: e.target.value })}
+          data-testid="form-table-size"
           className="form-input"
         >
-          <option value="snooker">Snooker</option>
-          <option value="mini_snooker">Mini Snooker</option>
-          <option value="pool">Pool</option>
-          {f.game_type === "ps5" && <option value="ps5">PS5</option>}
+          <option value="large">Large — Snooker only</option>
+          <option value="small">Small — Pool / Mini Snooker</option>
         </select>
       </Field>
       <Field label="Status">
@@ -669,10 +662,10 @@ function PS5StationForm({ onSubmit }) {
 }
 
 function StartSessionForm({ table, onSubmit, foodOrderId, pricing }) {
-  const gameType = table.game_type || "snooker";
-  const isPS5 = String(gameType).toLowerCase() === "ps5";
-  const isPool = gameType === "pool";
+  const isPS5 = table.game_type === "ps5";
+  const supportedGames = isPS5 ? ["ps5"] : (table.supported_games || (table.table_size === "small" || ["pool", "mini_snooker"].includes(table.game_type) ? ["pool", "mini_snooker"] : ["snooker"]));
   const [f, setF] = useState({
+    game_type: isPS5 ? "ps5" : (supportedGames.includes("snooker") ? "snooker" : "pool"),
     customer_name: "",
     billing_type: "normal",
     membership_id: "",
@@ -680,6 +673,8 @@ function StartSessionForm({ table, onSubmit, foodOrderId, pricing }) {
     rd_selected: false,
     duration_minutes: 30,
   });
+  const gameType = f.game_type;
+  const isPool = gameType === "pool";
   const [memberships, setMemberships] = useState([]);
   const refreshMemberships = async () => {
     const r = await api.get("/memberships");
@@ -715,6 +710,13 @@ function StartSessionForm({ table, onSubmit, foodOrderId, pricing }) {
       className="space-y-3"
       data-testid="start-session-form"
     >
+      {!isPS5 && (
+        <Field label="Select Game">
+          <select value={f.game_type} onChange={(e) => setF({ ...f, game_type: e.target.value, player_count: 2, duration_minutes: 30, rd_selected: false })} className="form-input" data-testid="start-game-type">
+            {supportedGames.map((g) => <option key={g} value={g}>{g.replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase())}</option>)}
+          </select>
+        </Field>
+      )}
       {!foodOrderId && isPS5 && (
         <Field label="Billing Type">
           <select

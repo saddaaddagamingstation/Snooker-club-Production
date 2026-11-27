@@ -1,0 +1,29 @@
+import { useMemo, useState } from "react";
+import { Monitor, CheckCircle2, CalendarDays, Gamepad2, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
+import { usePS5Data, dateKey, pad, dateTime, conflictFor, clockLabel } from "./ps5Utils";
+
+function Stat({icon:Icon,label,value,green=false}){return <div className="rounded-xl border border-[#292929] bg-[#121212] p-4"><div className="flex justify-between items-center gap-2"><span className="text-xs text-gray-500">{label}</span><Icon className={`w-4 h-4 ${green?"text-green-400":"text-gray-500"}`}/></div><div className={`text-2xl font-bold mt-2 ${green?"text-green-400":"text-white"}`}>{value}</div></div>}
+function Legend({color,label}){return <span className="inline-flex items-center gap-1.5 text-[11px] text-gray-400"><i className={`w-2.5 h-2.5 rounded-sm ${color}`}/>{label}</span>}
+function Timeline({station,date,bookings,sessions}){
+ const now=new Date();
+ const cells=Array.from({length:48},(_,i)=>{
+  const h=Math.floor(i/2),m=(i%2)*30;
+  const start=dateTime(date,`${pad(h)}:${pad(m)}`),end=new Date(start.getTime()+30*60000);
+  const conflict=conflictFor(station,start,end,bookings,sessions),past=start<now;
+  const cls=past?"bg-[#252525] border-[#333]":conflict?.kind==="live"||conflict?.kind==="maintenance"?"bg-amber-900/70 border-amber-800":conflict?.kind==="booked"?"bg-red-950 border-red-800":"bg-green-950 border-green-800";
+  return {h,m,conflict,past,cls};
+ });
+ return <div className="rounded-xl border border-[#292929] bg-[#0d0d0d] p-3">
+  <div className="flex items-center gap-2 mb-3"><Monitor className="w-4 h-4 text-green-400"/><b className="text-sm">{station.table_number}</b><span className="text-xs text-gray-500">{station.table_name}</span><span className="ml-auto text-[11px] text-gray-500">{station.status||"available"}</span></div>
+  <div className="overflow-x-auto"><div className="min-w-[1050px]">
+   <div className="grid gap-[2px] mb-1" style={{gridTemplateColumns:"100px repeat(48,minmax(16px,1fr))"}}><div className="text-[10px] text-gray-500">TIME</div>{cells.map((c,i)=><div key={i} className="text-[9px] text-gray-500 whitespace-nowrap">{c.m===0&&c.h%2===0?<span className="block leading-3">{clockLabel(c.h)}<small className="block text-[8px] text-gray-600">{pad(c.h)}:00</small></span>:""}</div>)}</div>
+   <div className="grid gap-[2px]" style={{gridTemplateColumns:"100px repeat(48,minmax(16px,1fr))"}}><div className="text-xs text-gray-400 flex items-center">{station.table_number}</div>{cells.map((c,i)=><div key={i} title={`${clockLabel(c.h,c.m)} · ${c.past?"Past":c.conflict?.label||"Free"}`} className={`h-7 rounded-[4px] border ${c.cls}`}/>)}</div>
+   <div className="flex justify-between text-[9px] text-gray-600 mt-1"><span>12:00 AM</span><span>12:00 AM · Next day</span></div>
+  </div></div>
+ </div>;
+}
+export default function PS5Overview(){const {stations,bookings,sessions,loading,refresh}=usePS5Data();const [day,setDay]=useState(dateKey(new Date()));const dayBookings=useMemo(()=>bookings.filter(b=>dateKey(new Date(b.start_at))===day&&["confirmed","started"].includes(b.status)),[bookings,day]);const shift=n=>{const d=new Date(`${day}T00:00:00`);d.setDate(d.getDate()+n);setDay(dateKey(d));};const now=new Date();const nextHalfHour=new Date(now.getTime()+30*60000);const free=stations.filter(t=>!conflictFor(t,now,nextHalfHour,bookings,sessions)).length;
+ return <div className="space-y-6"><div className="flex items-end justify-between gap-3 flex-wrap"><div><div className="text-xs uppercase tracking-[.22em] text-green-500 font-bold">Console reservations</div><h2 className="text-3xl font-bold mt-2">PS5 Overview</h2><p className="text-sm text-gray-400 mt-1">Station capacity and a full 24-hour availability view.</p></div><button onClick={()=>refresh()} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-[#303030] bg-[#151515] text-sm"><RefreshCw className="w-4 h-4"/>Refresh</button></div>
+ <section className="grid grid-cols-2 xl:grid-cols-4 gap-3"><Stat icon={Monitor} label="Total PS5 stations" value={stations.length}/><Stat icon={CheckCircle2} label="Free stations now" value={free} green/><Stat icon={CalendarDays} label="Bookings on selected day" value={dayBookings.length}/><Stat icon={Gamepad2} label="Live sessions" value={sessions.length}/></section>
+ <section className="rounded-2xl border border-[#292929] bg-[#121212] p-5 space-y-4"><div className="flex flex-wrap justify-between items-center gap-3"><div><h3 className="font-semibold flex items-center gap-2"><CalendarDays className="w-4 h-4 text-green-400"/>Station availability calendar</h3><p className="text-xs text-gray-500 mt-1">Every day from 12:00 AM to 12:00 AM. Each block represents 30 minutes.</p></div><div className="flex gap-2 items-center"><button onClick={()=>shift(-1)} className="p-2 rounded-lg border border-[#303030]"><ChevronLeft className="w-4 h-4"/></button><input type="date" value={day} onChange={e=>setDay(e.target.value)} className="h-10 px-3 rounded-lg bg-[#0b0b0b] border border-[#303030] text-sm"/><button onClick={()=>shift(1)} className="p-2 rounded-lg border border-[#303030]"><ChevronRight className="w-4 h-4"/></button></div></div><div className="flex flex-wrap gap-4"><Legend color="bg-green-900 border border-green-800" label="Free"/><Legend color="bg-red-950 border border-red-800" label="Booked"/><Legend color="bg-amber-900 border border-amber-800" label="Live / unavailable"/><Legend color="bg-[#252525] border border-[#333]" label="Past time"/></div>{loading?<p className="text-sm text-gray-500">Loading stations…</p>:!stations.length?<p className="text-sm text-amber-400">No PS5 stations configured. Add them from the Stations page.</p>:<div className="space-y-3">{stations.map(t=><Timeline key={t.id} station={t} date={day} bookings={bookings} sessions={sessions}/>)}</div>}</section></div>;
+}

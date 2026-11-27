@@ -11,7 +11,6 @@ import Login from "@/pages/Login";
 
 const Dashboard = lazy(() => import("@/pages/Dashboard"));
 const Tables = lazy(() => import("@/pages/Tables"));
-const PS5Bookings = lazy(() => import("@/pages/PS5Bookings"));
 const Sessions = lazy(() => import("@/pages/Sessions"));
 const Snacks = lazy(() => import("@/pages/Snacks"));
 const FoodOrders = lazy(() => import("@/pages/FoodOrders"));
@@ -25,6 +24,11 @@ const MembershipOverview = lazy(() => import("@/pages/memberships/MembershipOver
 const MembershipPackages = lazy(() => import("@/pages/memberships/MembershipPackages"));
 const MembershipMembers = lazy(() => import("@/pages/memberships/MembershipMembers"));
 const MembershipGameRecords = lazy(() => import("@/pages/memberships/MembershipGameRecords"));
+const PS5Layout = lazy(() => import("@/pages/ps5/PS5Layout"));
+const PS5Overview = lazy(() => import("@/pages/ps5/PS5Overview"));
+const PS5BookingPage = lazy(() => import("@/pages/ps5/PS5BookingPage"));
+const PS5Reservations = lazy(() => import("@/pages/ps5/PS5Reservations"));
+const PS5LiveSessions = lazy(() => import("@/pages/ps5/PS5LiveSessions"));
 
 function Protected({ children, perm }) {
   const { user, authStatus, can, refresh } = useAuth();
@@ -42,7 +46,6 @@ export default function App() {
       <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route path="/dashboard" element={<Dashboard />} />
       <Route path="/tables" element={<Tables />} />
-      <Route path="/ps5-bookings" element={<Protected perm="manage_sessions"><PS5Bookings /></Protected>}/>
       <Route path="/sessions" element={<Protected perm="manage_sessions"><Sessions /></Protected>} />
       <Route path="/snacks" element={<Snacks />} />
       <Route path="/reports" element={<Protected perm="view_reports"><Reports /></Protected>} />
@@ -52,6 +55,13 @@ export default function App() {
       <Route path="/bill/:id" element={<Bill />} />
       <Route path="/food-orders" element={<FoodOrders />} />
     </Route>
+    <Route path="/ps5" element={<Protected perm="manage_sessions"><PS5Layout /></Protected>}>
+      <Route index element={<PS5Overview />} />
+      <Route path="bookings" element={<PS5BookingPage />} />
+      <Route path="reservations" element={<PS5Reservations />} />
+      <Route path="live" element={<PS5LiveSessions />} />
+    </Route>
+    <Route path="/ps5-bookings" element={<Navigate to="/ps5/bookings" replace />} />
     <Route path="/memberships" element={<Protected perm="manage_sessions"><MembershipLayout /></Protected>}>
       <Route index element={<MembershipOverview />} />
       <Route path="packages" element={<MembershipPackages />} />
