@@ -113,49 +113,82 @@ export function usePS5Data(interval = 30000) {
   return { ...data, loading, refresh: load };
 }
 
-export function conflictFor(
-  station,
-  start,
-  end,
-  bookings,
-  sessions
-) {
-  if (
-    String(station.status || "").toLowerCase() === "maintenance"
-  ) {
+
+export function conflictFor(station, start, end, bookings, sessions) {
+  if (String(station.status || "").toLowerCase() === "maintenance") {
     return { kind: "maintenance", label: "Maintenance" };
   }
 
   const active = sessions.find(
-    (s) => s.table_id === station.id
+    (s) => s.table_id === station.id && s.status === "active"
   );
 
   if (active) {
-    return {
-      kind: "live",
-      label: `Live · ${active.customer_name || "Playing"}`,
-    };
-  }
+    let availableAt = null;
 
-  if (
+    if (active.game_timer_enabled) {
+      const mode = active.timer_mode;
+
+      if (mode === "awaiting_decision") {
+        if (active.timer_expired_at) {
+          availableAt = new Date(active.timer_expired_at);
+        } else if (active.timer_started_at) {
+          availableAt = new Date(
+            new Date(active.timer_started_at).getTime() +
+            Number(active.timer_remaining_seconds || 0) * 1000
+          );
+        }
+      } else if (
+        mode === "countdown" &&
+        !active.is_paused &&
+        active.timer_started_at
+      ) {
+        availableAt = new Date(
+          new Date(active.timer_started_at).getTime() +
+          Number(active.timer_remaining_seconds || 0) * 1000
+        );
+      }
+    }
+
+    // Unknown, paused, membership or untimed sessions remain occupied.
+    if (!availableAt || Number.isNaN(availableAt.getTime())) {
+      return {
+        kind: "live",
+        label: `Live · ${active.customer_name || "Playing"}`,
+      };
+    }
+
+    // Station releases 15 minutes after countdown expiry.
+    availableAt = new Date(availableAt.getTime() + 15 * 60 * 1000);
+
+    if (start < availableAt) {
+      return {
+        kind: "live",
+        label: `Live until ${availableAt.toLocaleTimeString("en-IN", {
+          hour: "2-digit",
+          minute: "2-digit",
+        })}`,
+      };
+    }
+  } else if (
     String(station.status || "").toLowerCase() === "running"
   ) {
     return { kind: "live", label: "Currently running" };
   }
 
-  const b = bookings.find(
-    (x) =>
-      x.table_id === station.id &&
-      x.status === "confirmed" &&
-      new Date(x.start_at) < end &&
-      new Date(x.end_at) > start
+  const booking = bookings.find(
+    (b) =>
+      b.table_id === station.id &&
+      b.status === "confirmed" &&
+      new Date(b.start_at) < end &&
+      new Date(b.end_at) > start
   );
 
-  return b
+  return booking
     ? {
         kind: "booked",
-        label: `Booked · ${b.customer_name}`,
-        booking: b,
+        label: `Booked · ${booking.customer_name}`,
+        booking,
       }
     : null;
 }

@@ -7,18 +7,44 @@ import { toast } from "sonner";
 import api, { formatApiErrorDetail, inr } from "@/lib/api";
 
 const money = (n) => inr(Number(n || 0));
-const DURATION_OPTIONS = [30, 60, 90, 120];
+const DURATION_OPTIONS = [30, 60, 90, 120, 180, 240, 300, 360];
+const formatDuration = (minutes) => {
+  if (minutes === 30) return "30 minutes";
+  if (minutes < 60) return `${minutes} minutes`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours} hour 30 minutes` : `${hours} ${hours === 1 ? "hour" : "hours"}`;
+};
 const pad = (n) => String(n).padStart(2, "0");
 const dateKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const localDateTime = (date, time) => new Date(`${date}T${time}:00`);
 const fmt = (value) => new Date(value).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 
+function getActiveSessionReleaseTime(session) {
+  if (!session?.game_timer_enabled || session.is_paused) return null;
+  if (session.timer_mode === "awaiting_decision") {
+    return session.timer_expired_at ? new Date(session.timer_expired_at) : null;
+  }
+  if (session.timer_mode !== "countdown" || !session.timer_started_at) return null;
+  const startedAt = new Date(session.timer_started_at);
+  if (Number.isNaN(startedAt.getTime())) return null;
+  return new Date(startedAt.getTime() + Number(session.timer_remaining_seconds || 0) * 1000);
+}
+
 function getBookingConflict(station, start, end, bookings, activeSessions) {
-  if (["maintenance", "running"].includes(String(station.status || "").toLowerCase())) {
-    return { type: "station", label: station.status === "maintenance" ? "Maintenance" : "Currently running" };
+  if (String(station.status || "").toLowerCase() === "maintenance") {
+    return { type: "station", label: "Maintenance" };
   }
   const active = activeSessions.find(s => s.table_id === station.id);
-  if (active) return { type: "session", label: `In session · ${active.customer_name || "Playing"}` };
+  if (active) {
+    const expectedEnd = getActiveSessionReleaseTime(active);
+    const availableAt = expectedEnd ? new Date(expectedEnd.getTime() + 15 * 60000) : null;
+    if (!availableAt || start < availableAt) {
+      return { type: "session", label: `In session · ${active.customer_name || "Playing"}` };
+    }
+  } else if (String(station.status || "").toLowerCase() === "running") {
+    return { type: "station", label: "Currently running" };
+  }
   const conflict = bookings.find(b => b.table_id === station.id && b.status === "confirmed" &&
     new Date(b.start_at) < end && new Date(b.end_at) > start);
   if (conflict) return { type: "booking", label: `Booked · ${conflict.customer_name}`, booking: conflict };
@@ -49,6 +75,33 @@ export default function PS5Bookings() {
   const startAt = useMemo(() => localDateTime(form.start_date, form.start_time), [form.start_date, form.start_time]);
   const endAt = useMemo(() => new Date(startAt.getTime() + Number(form.duration_minutes) * 60000), [startAt, form.duration_minutes]);
   const selectedMember = memberships.find(m => m.id === form.membership_id);
+  const membershipDailyLimitSeconds = selectedMember
+    ? Math.min(Number(selectedMember.daily_minutes || 120), 120) * 60
+    : 120 * 60;
+  const membershipUsedSeconds = selectedMember
+    ? Number(selectedMember.daily_usage?.[form.start_date] || 0)
+    : 0;
+  const membershipReservedSeconds = selectedMember
+    ? bookings
+        .filter(b => b.membership_id === selectedMember.id && b.status === "confirmed")
+        .reduce((total, b) => {
+          const bookingStart = new Date(b.start_at);
+          const bookingEnd = new Date(b.end_at);
+          const dayStart = localDateTime(form.start_date, "00:00");
+          const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+          return total + Math.max(0, Math.min(bookingEnd, dayEnd) - Math.max(bookingStart, dayStart)) / 1000;
+        }, 0)
+    : 0;
+  const membershipRemainingMinutes = Math.max(
+    0,
+    Math.floor((membershipDailyLimitSeconds - membershipUsedSeconds - membershipReservedSeconds) / 60)
+  );
+  const availableDurations = form.billing_type === "membership"
+    ? [...new Set([
+        ...DURATION_OPTIONS.filter(n => n <= 120 && n <= membershipRemainingMinutes),
+        ...(membershipRemainingMinutes > 0 ? [membershipRemainingMinutes] : [])
+      ])].sort((a, b) => a - b)
+    : DURATION_OPTIONS;
   const hourlyRate = Number(pricing.players?.[String(form.player_count)] ?? ({ 1: 129, 2: 199, 3: 299, 4: 369 }[form.player_count]));
   const estimated = form.billing_type === "membership" ? 0 : hourlyRate * Number(form.duration_minutes) / 60;
 
@@ -85,7 +138,30 @@ export default function PS5Bookings() {
 
   const isPastSelection = startAt.getTime() < Date.now();
 
-  const changeForm = (patch) => setForm(f => ({ ...f, ...patch }));
+  const changeForm = (patch) => setForm(f => {
+    const next = { ...f, ...patch };
+    if (next.billing_type === "membership") {
+      const member = memberships.find(m => m.id === next.membership_id);
+      if (member) {
+        const limitSeconds = Math.min(Number(member.daily_minutes || 120), 120) * 60;
+        const usedSeconds = Number(member.daily_usage?.[next.start_date] || 0);
+        const reservedSeconds = bookings
+          .filter(b => b.membership_id === member.id && b.status === "confirmed")
+          .reduce((total, b) => {
+            const bookingStart = new Date(b.start_at);
+            const bookingEnd = new Date(b.end_at);
+            const dayStart = localDateTime(next.start_date, "00:00");
+            const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+            return total + Math.max(0, Math.min(bookingEnd, dayEnd) - Math.max(bookingStart, dayStart)) / 1000;
+          }, 0);
+        const remaining = Math.max(0, Math.floor((limitSeconds - usedSeconds - reservedSeconds) / 60));
+        if (next.duration_minutes > remaining) {
+          next.duration_minutes = [120, 90, 60, 30].find(n => n <= remaining) || remaining || 30;
+        }
+      }
+    }
+    return next;
+  });
   const submit = async (e) => {
     e.preventDefault();
     if (!form.customer_name.trim()) return toast.error("Enter the customer name");
@@ -151,6 +227,20 @@ export default function PS5Bookings() {
         <form onSubmit={submit} style={{ width: "100%", maxWidth: "1040px", marginInline: "auto" }} className="min-w-0 rounded-2xl border border-[#292929] bg-[#121212] p-5 space-y-4" id="new-booking-form">
           <div className="flex items-center gap-2 font-semibold"><Plus className="w-4 h-4 text-green-400"/>New reservation</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-4">
+            <Field label="Billing type">
+              <select value={form.billing_type} onChange={e=>changeForm({billing_type:e.target.value,membership_id:""})} className="booking-input"><option value="normal">Regular paid booking</option><option value="membership">Membership booking</option></select>
+            </Field>
+            {form.billing_type === "membership" && <Field label="Select member">
+              <MemberPicker
+                members={memberships}
+                selectedId={form.membership_id}
+                onSelect={member => changeForm({
+                  membership_id: member.id,
+                  customer_name: member.member_name || "",
+                  phone: String(member.phone || "").replace(/\D/g, "").slice(-10)
+                })}
+              />
+            </Field>}
             <Field label="Customer name"><input required value={form.customer_name} onChange={e=>changeForm({customer_name:e.target.value})} className="booking-input" placeholder="Customer name"/></Field>
             <Field label="Phone (optional)"><input type="tel" inputMode="numeric" autoComplete="tel-national" maxLength={10} pattern="[0-9]{10}" value={form.phone} onChange={e=>changeForm({phone:e.target.value.replace(/\D/g, "").slice(0, 10)})} className="booking-input" placeholder="10-digit mobile number"/></Field>
             <Field label="Booking date">
@@ -160,7 +250,8 @@ export default function PS5Bookings() {
               <TimePicker value={form.start_time} onChange={value=>changeForm({start_time:value})}/>
             </Field>
             <Field label="Duration">
-              <select value={form.duration_minutes} onChange={e=>changeForm({duration_minutes:Number(e.target.value)})} className="booking-input">{DURATION_OPTIONS.map(n=><option key={n} value={n}>{n} minutes</option>)}</select>
+              <select value={form.duration_minutes} onChange={e=>changeForm({duration_minutes:Number(e.target.value)})} className="booking-input">{(availableDurations.length ? availableDurations : []).map(n=><option key={n} value={n}>{formatDuration(n)}</option>)}</select>
+              {form.billing_type === "membership" && selectedMember && <span className="block text-[11px] text-gray-500 mt-1">Daily allowance remaining for {form.start_date}: {membershipRemainingMinutes} minutes (maximum 120 minutes per day).</span>}
             </Field>
             <Field label="Number of players">
               <select value={form.player_count} onChange={e=>changeForm({player_count:Number(e.target.value)})} className="booking-input">{[1,2,3,4].map(n=><option key={n} value={n}>{n} {n===1?"player":"players"}</option>)}</select>
@@ -171,19 +262,13 @@ export default function PS5Bookings() {
                 {stationAvailability.map(({station,conflict})=><option key={station.id} value={station.id} disabled={!!conflict}>{station.table_number} · {conflict ? conflict.label : "Free for selected time"}</option>)}
               </select>
             </Field>
-            <Field label="Booking type">
-              <select value={form.billing_type} onChange={e=>changeForm({billing_type:e.target.value,membership_id:""})} className="booking-input"><option value="normal">Regular paid booking</option><option value="membership">Membership booking</option></select>
-            </Field>
-            {form.billing_type === "membership" && <Field label="Select member">
-              <select required value={form.membership_id} onChange={e=>changeForm({membership_id:e.target.value})} className="booking-input"><option value="">Choose active membership</option>{memberships.map(m=><option key={m.id} value={m.id}>{m.member_name} · {m.plan} · {(m.remaining_total_seconds/3600).toFixed(1)}h left</option>)}</select>
-            </Field>}
           </div>
           <Field label="Notes (optional)"><textarea rows={2} value={form.notes} onChange={e=>changeForm({notes:e.target.value})} className="booking-input h-auto" placeholder="Any booking notes"/></Field>
           <div className="rounded-xl border border-green-800/40 bg-green-950/20 p-2.5 flex items-center justify-between gap-3">
             <div><div className="text-xs text-gray-400">{form.billing_type === "membership" ? "Due when the actual session ends" : "Estimated booking charge"}</div><div className="text-xs text-gray-500 mt-1">{form.duration_minutes} min · ends {fmt(endAt)}</div>{form.billing_type === "membership" && selectedMember && <div className="text-xs text-gray-500 mt-1">No membership time is deducted until session start. Extra-player fee follows membership rules.</div>}{form.billing_type === "normal" && <div className="text-xs text-gray-500 mt-1">{money(hourlyRate)}/hour</div>}</div>
             <div className="text-xl font-bold text-green-400">{form.billing_type === "membership" ? "₹0 advance" : money(estimated)}</div>
           </div>
-          <button disabled={saving || !tables.length || isPastSelection || (form.table_id && !!stationAvailability.find(x=>x.station.id===form.table_id)?.conflict)} className="w-full rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-50 py-2 font-semibold">{saving ? "Confirming…" : "Confirm booking"}</button>
+          <button disabled={saving || !tables.length || isPastSelection || (form.billing_type === "membership" && (membershipRemainingMinutes <= 0 || form.duration_minutes > membershipRemainingMinutes)) || (form.table_id && !!stationAvailability.find(x=>x.station.id===form.table_id)?.conflict) || (!form.table_id && !stationAvailability.some(x => !x.conflict))} className="w-full rounded-xl bg-green-700 hover:bg-green-600 disabled:opacity-50 py-2 font-semibold">{saving ? "Confirming…" : "Confirm booking"}</button>
         </form>
 
       </div>
@@ -197,6 +282,59 @@ export default function PS5Bookings() {
   </div>;
 }
 
+
+function MemberPicker({ members, selectedId, onSelect }) {
+  const [search, setSearch] = useState("");
+  const [open, setOpen] = useState(false);
+  const selected = members.find(member => member.id === selectedId);
+  const normalizedSearch = search.trim().toLowerCase();
+  const filteredMembers = members.filter(member => {
+    const searchable = [member.member_name, member.phone, member.id, member.plan]
+      .filter(Boolean).join(" ").toLowerCase();
+    return searchable.includes(normalizedSearch);
+  });
+
+  return (
+    <div className="relative w-full">
+      <button type="button" onClick={() => setOpen(value => !value)}
+        className="booking-input flex items-center justify-between gap-2 text-left"
+        aria-haspopup="listbox" aria-expanded={open}>
+        <span className="truncate">{selected
+          ? `${selected.member_name} · ${selected.phone || "No phone"} · ${selected.plan || "Membership"}`
+          : "Search and select a member"}</span>
+        <ChevronRight className={`w-4 h-4 shrink-0 text-gray-400 transition-transform ${open ? "rotate-90" : ""}`} />
+      </button>
+
+      {open && <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[80] overflow-hidden rounded-xl border border-[#383838] bg-[#171717] shadow-2xl">
+        <div className="border-b border-[#303030] p-2">
+          <input autoFocus type="search" value={search}
+            onChange={event => setSearch(event.target.value)}
+            placeholder="Search by name, phone number or member ID..."
+            className="booking-input"
+            aria-label="Search memberships by name, phone number or member ID" />
+          <div className="px-1 pt-2 text-[10px] text-gray-500">
+            {filteredMembers.length} of {members.length} members · Search by name, phone, ID or plan
+          </div>
+        </div>
+        <div className="max-h-64 overflow-y-auto overscroll-contain" role="listbox" aria-label="Active members">
+          {filteredMembers.length ? filteredMembers.map(member => <button key={member.id}
+            type="button" role="option" aria-selected={member.id === selectedId}
+            onClick={() => { onSelect(member); setSearch(""); setOpen(false); }}
+            className={`block w-full border-b border-[#292929] px-3 py-2.5 text-left last:border-b-0 hover:bg-[#242424] ${member.id === selectedId ? "bg-green-950/40" : ""}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-sm font-semibold text-gray-100">{member.member_name || "Unnamed member"}</span>
+              <span className="shrink-0 text-[10px] text-green-400">{(Number(member.remaining_total_seconds || 0) / 3600).toFixed(1)}h left</span>
+            </div>
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-gray-400">
+              <span>{member.phone || "No phone number"}</span><span>{member.plan || "Membership"}</span>
+            </div>
+            <div className="mt-1 break-all font-mono text-[10px] text-gray-600">ID: {member.id}</div>
+          </button>) : <div className="px-3 py-6 text-center text-xs text-gray-500">No matching member found</div>}
+        </div>
+      </div>}
+    </div>
+  );
+}
 
 function DatePicker({value,minDate,onChange}) {
   const [open,setOpen]=useState(false);

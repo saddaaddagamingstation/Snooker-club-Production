@@ -1168,9 +1168,50 @@ def _ps5_parse_datetime(value: str) -> datetime:
         raise HTTPException(status_code=400, detail="Invalid booking date or time")
 
 
+async def _ps5_active_session_blocks_booking(table_id: str, booking_start: datetime) -> bool:
+    """Return whether an active PS5 session still occupies the station at booking_start.
+
+    Timed sessions release the station 15 minutes after their countdown expires.
+    Paused, membership, and untimed sessions remain blocking because their end
+    time cannot be predicted safely.
+    """
+    active_session = await db.sessions.find_one(
+        {"table_id": table_id, "status": "active", "game_type": "ps5"},
+        {"_id": 0}
+    )
+    if not active_session:
+        return False
+
+    if not active_session.get("game_timer_enabled"):
+        return True
+
+    timer_mode = active_session.get("timer_mode")
+    if timer_mode == "awaiting_decision":
+        expired_at = active_session.get("timer_expired_at")
+        if not expired_at:
+            timer_started_at = active_session.get("timer_started_at")
+            remaining = int(active_session.get("timer_remaining_seconds") or 0)
+            if not timer_started_at:
+                return True
+            expected_end = _ps5_parse_datetime(timer_started_at) + timedelta(seconds=remaining)
+        else:
+            expected_end = _ps5_parse_datetime(expired_at)
+    elif timer_mode == "countdown":
+        if active_session.get("is_paused") or not active_session.get("timer_started_at"):
+            return True
+        timer_started_at = _ps5_parse_datetime(active_session["timer_started_at"])
+        remaining = max(0, int(active_session.get("timer_remaining_seconds") or 0))
+        expected_end = timer_started_at + timedelta(seconds=remaining)
+    else:
+        # Do not assume a release time for count-up or unknown timer modes.
+        return True
+
+    available_at = expected_end + timedelta(minutes=15)
+    return booking_start < available_at
+
+
 async def _ps5_station_is_available(table_id: str, start: datetime, end: datetime):
-    active_session = await db.sessions.find_one({"table_id": table_id, "status": "active"})
-    if active_session:
+    if await _ps5_active_session_blocks_booking(table_id, start):
         return False
 
     existing = await db.ps5_bookings.find(
@@ -1229,8 +1270,11 @@ async def create_ps5_booking(body: PS5BookingCreate, user=Depends(require_permis
     start = _ps5_parse_datetime(body.start_at)
     end = _ps5_parse_datetime(body.end_at)
     duration_seconds = (end - start).total_seconds()
-    if duration_seconds not in (1800, 3600, 5400, 7200):
-        raise HTTPException(status_code=400, detail="PS5 bookings must be exactly 30, 60, 90 or 120 minutes")
+    if body.membership_id:
+        if duration_seconds <= 0 or duration_seconds > 7200 or duration_seconds % 60 != 0:
+            raise HTTPException(status_code=400, detail="Membership PS5 bookings must be between 1 and 120 minutes")
+    elif duration_seconds not in (1800, 3600, 5400, 7200, 10800, 14400, 18000, 21600):
+        raise HTTPException(status_code=400, detail="Regular PS5 bookings must be 30 minutes, 1 hour, 1.5 hours, or 2 to 6 hours")
     if start < now_utc():
         raise HTTPException(status_code=400, detail="Cannot create a booking in the past")
 
@@ -1256,6 +1300,51 @@ async def create_ps5_booking(body: PS5BookingCreate, user=Depends(require_permis
             raise HTTPException(status_code=400, detail="Membership will be expired at the booking time")
         if state["remaining_total_seconds"] <= 0:
             raise HTTPException(status_code=400, detail="Membership has no remaining hours")
+
+        # Reserve the daily membership allowance at booking time. Actual usage is
+        # still deducted only when the session starts; confirmed future bookings
+        # reserve capacity so multiple bookings cannot exceed the daily limit.
+        daily_allowance_seconds = min(int(membership.get("daily_minutes", 120)), 120) * 60
+        daily_usage = membership.get("daily_usage") or {}
+        existing_reservations = await db.ps5_bookings.find(
+            {
+                "membership_id": membership["id"],
+                "status": "confirmed",
+            },
+            {"_id": 0, "start_at": 1, "end_at": 1},
+        ).to_list(1000)
+
+        day_cursor = start.astimezone(CLUB_TIMEZONE).date()
+        final_day = (end - timedelta(microseconds=1)).astimezone(CLUB_TIMEZONE).date()
+        while day_cursor <= final_day:
+            day_start = datetime.combine(day_cursor, datetime.min.time(), tzinfo=CLUB_TIMEZONE).astimezone(timezone.utc)
+            day_end = (datetime.combine(day_cursor, datetime.min.time(), tzinfo=CLUB_TIMEZONE) + timedelta(days=1)).astimezone(timezone.utc)
+
+            requested_seconds = max(
+                0,
+                (min(end, day_end) - max(start, day_start)).total_seconds(),
+            )
+            reserved_seconds = 0
+            for reservation in existing_reservations:
+                reservation_start = _ps5_parse_datetime(reservation["start_at"])
+                reservation_end = _ps5_parse_datetime(reservation["end_at"])
+                reserved_seconds += max(
+                    0,
+                    (min(reservation_end, day_end) - max(reservation_start, day_start)).total_seconds(),
+                )
+
+            used_seconds = float(daily_usage.get(day_cursor.isoformat(), 0) or 0)
+            if used_seconds + reserved_seconds + requested_seconds > daily_allowance_seconds:
+                remaining_minutes = max(
+                    0,
+                    int((daily_allowance_seconds - used_seconds - reserved_seconds) // 60),
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Membership daily limit is 2 hours. Only {remaining_minutes} minute(s) remain for {day_cursor.isoformat()}.",
+                )
+            day_cursor += timedelta(days=1)
+
         # A reservation is not a play session: do not consume membership time
         # or charge extra-player fees until the actual session starts.
         amount = 0.0
@@ -1267,13 +1356,23 @@ async def create_ps5_booking(body: PS5BookingCreate, user=Depends(require_permis
         selected = next((station for station in stations if station["id"] == body.table_id), None)
         if not selected:
             raise HTTPException(status_code=404, detail="Selected PS5 station not found")
-        if selected.get("status") in ("maintenance", "running"):
+        if selected.get("status") == "maintenance":
+            raise HTTPException(status_code=409, detail="Selected PS5 station is not available")
+        if selected.get("status") == "running" and not await db.sessions.find_one(
+            {"table_id": selected["id"], "status": "active", "game_type": "ps5"},
+            {"_id": 1}
+        ):
             raise HTTPException(status_code=409, detail="Selected PS5 station is not available")
         if not await _ps5_station_is_available(selected["id"], start, end):
             raise HTTPException(status_code=409, detail="Selected PS5 station already has an overlapping booking or active session")
     else:
         for station in stations:
-            if station.get("status") in ("maintenance", "running"):
+            if station.get("status") == "maintenance":
+                continue
+            if station.get("status") == "running" and not await db.sessions.find_one(
+                {"table_id": station["id"], "status": "active", "game_type": "ps5"},
+                {"_id": 1}
+            ):
                 continue
             if await _ps5_station_is_available(station["id"], start, end):
                 selected = station
@@ -3114,8 +3213,8 @@ async def start_session(body: SessionStart, user=Depends(require_permission("man
         if game_type in ("snooker", "mini_snooker") and not 2 <= int(body.player_count or 0) <= 6:
             raise HTTPException(status_code=400, detail="Choose 2 to 6 players")
         if game_type == "ps5":
-            if duration not in (30, 60, 90, 120):
-                raise HTTPException(status_code=400, detail="PS5 sessions must be 30, 60, 90 or 120 minutes")
+            if duration not in (30, 60, 90, 120, 180, 240, 300, 360):
+                raise HTTPException(status_code=400, detail="PS5 sessions must be 30 minutes, 1 hour, 1.5 hours, or 2 to 6 hours")
             if not 1 <= int(body.player_count or 1) <= 4:
                 raise HTTPException(status_code=400, detail="PS5 supports 1 to 4 players")
     membership = None

@@ -795,8 +795,10 @@ function StartSessionForm({ table, onSubmit, foodOrderId, pricing }) {
                 onChange={(e) => setF({ ...f, duration_minutes: Number(e.target.value) })}
                 className="form-input"
               >
-                {[10, 20, 30, 40, 60, 90, 120, 150, 180].map((n) => (
-                  <option key={n} value={n}>{n} minutes</option>
+                {[30, 60, 90, 120, 180, 240, 300, 360].map((n) => (
+                  <option key={n} value={n}>
+                    {n === 30 ? "30 minutes" : n % 60 === 0 ? `${n / 60} ${n === 60 ? "hour" : "hours"}` : `${Math.floor(n / 60)} hour 30 minutes`}
+                  </option>
                 ))}
               </select>
             </Field>
