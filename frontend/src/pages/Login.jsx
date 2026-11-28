@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useAuth } from "@/lib/auth";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { Circle, Eye, EyeOff, Loader2 } from "lucide-react";
 import api, { formatApiErrorDetail } from "@/lib/api";
@@ -15,6 +15,7 @@ export default function Login() {
   const [busy, setBusy] = useState(false);
   const [forgotOpen, setForgotOpen] = useState(false);
   const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotBusy, setForgotBusy] = useState(false);
 
   if (user === undefined) return null;
   if (user) { navigate("/dashboard"); return null; }
@@ -24,17 +25,27 @@ export default function Login() {
     setBusy(true);
     const res = await login(email, password, remember);
     setBusy(false);
-    if (res.ok) { toast.success("Welcome back"); navigate("/dashboard"); }
-    else toast.error(res.error || "Login failed");
+    if (res.ok) {
+      toast.success("Welcome back");
+      navigate("/dashboard");
+    } else {
+      toast.error(res.error || "Login failed");
+    }
   };
 
-  const sendForgot = async () => {
+  const sendForgot = async (e) => {
+    e?.preventDefault();
+    if (!forgotEmail.trim() || forgotBusy) return;
+
+    setForgotBusy(true);
     try {
-      await api.post("/auth/forgot-password", { email: forgotEmail });
-      toast.success("If your email exists, reset link generated. Check server logs.");
+      await api.post("/auth/forgot-password", { email: forgotEmail.trim() });
+      toast.success("If an account exists for that email, a reset link has been sent. Check your inbox and spam folder.");
       setForgotOpen(false);
     } catch (e) {
-      toast.error(formatApiErrorDetail(e.response?.data?.detail));
+      toast.error(formatApiErrorDetail(e.response?.data?.detail) || "Unable to send reset email. Please try again.");
+    } finally {
+      setForgotBusy(false);
     }
   };
 
@@ -118,7 +129,17 @@ export default function Login() {
                   <input data-testid="remember-me" type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} className="w-4 h-4 accent-green-600" />
                   Remember me
                 </label>
-                <button type="button" onClick={() => setForgotOpen(true)} className="text-green-500 hover:text-green-400 font-medium" data-testid="forgot-password-link">Forgot password?</button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForgotEmail(email);
+                    setForgotOpen(true);
+                  }}
+                  className="text-green-500 hover:text-green-400 font-medium"
+                  data-testid="forgot-password-link"
+                >
+                  Forgot password?
+                </button>
               </div>
               <button
                 data-testid="login-submit-btn"
@@ -130,21 +151,39 @@ export default function Login() {
               </button>
             </form>
           ) : (
-            <div className="space-y-4">
-              <p className="text-sm text-gray-400">Enter your account email. A reset link will be generated in server logs.</p>
+            <form onSubmit={sendForgot} className="space-y-4">
+              <p className="text-sm text-gray-400">
+                Enter your account email. If an account exists, we'll send you a password reset link. The link expires after 1 hour.
+              </p>
               <input
                 data-testid="forgot-email"
                 type="email"
+                required
+                autoComplete="email"
                 value={forgotEmail}
                 onChange={(e) => setForgotEmail(e.target.value)}
                 className="w-full h-12 px-4 rounded-lg bg-[#0f0f0f] border border-[#262626] text-white placeholder-gray-600 focus:outline-none focus:border-green-700"
                 placeholder="you@cuelounge.com"
               />
               <div className="flex gap-3">
-                <button data-testid="forgot-submit" onClick={sendForgot} className="flex-1 h-12 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold">Send reset link</button>
-                <button onClick={() => setForgotOpen(false)} className="px-6 h-12 rounded-xl bg-[#1c1c1c] hover:bg-[#262626] text-gray-300">Back</button>
+                <button
+                  data-testid="forgot-submit"
+                  type="submit"
+                  disabled={forgotBusy || !forgotEmail.trim()}
+                  className="flex-1 h-12 rounded-xl bg-green-700 hover:bg-green-800 text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {forgotBusy ? <><Loader2 className="w-4 h-4 animate-spin" /> Sending...</> : "Send reset link"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForgotOpen(false)}
+                  disabled={forgotBusy}
+                  className="px-6 h-12 rounded-xl bg-[#1c1c1c] hover:bg-[#262626] text-gray-300 disabled:opacity-60"
+                >
+                  Back
+                </button>
               </div>
-            </div>
+            </form>
           )}
         </div>
       </div>

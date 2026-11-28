@@ -1,6 +1,10 @@
 import asyncio
 import time
 import secrets
+import hashlib
+import smtplib
+from email.message import EmailMessage
+from urllib.parse import quote
 from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
 from pathlib import Path
@@ -85,6 +89,59 @@ def verify_password(p: str, h: str) -> bool:
         return bcrypt.checkpw(p.encode(), h.encode())
     except Exception:
         return False
+
+
+def validate_password_strength(password: str):
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
+    if not any(char.isalpha() for char in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one letter")
+    if not any(char.isdigit() for char in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one number")
+    if not any(not char.isalnum() for char in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one symbol")
+
+
+def _send_password_reset_email_sync(recipient: str, reset_url: str):
+    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    sender = os.environ.get("SMTP_FROM") or smtp_user
+
+    if not smtp_user or not smtp_password or not sender:
+        raise RuntimeError("SMTP_USER, SMTP_PASSWORD, and SMTP_FROM must be configured")
+
+    message = EmailMessage()
+    message["Subject"] = "Reset your Sadda Adda Snooker password"
+    message["From"] = sender
+    message["To"] = recipient
+    message.set_content(
+        "We received a request to reset your Sadda Adda Snooker password.\\n\\n"
+        f"Use this link within 1 hour: {reset_url}\\n\\n"
+        "If you did not request this, you can ignore this email."
+    )
+    message.add_alternative(
+        f"""<!doctype html>
+<html><body style="font-family:Arial,sans-serif;color:#222;line-height:1.6">
+  <h2>Password reset request</h2>
+  <p>We received a request to reset your Sadda Adda Snooker password.</p>
+  <p><a href="{reset_url}" style="display:inline-block;padding:12px 18px;background:#171717;color:#fff;text-decoration:none;border-radius:6px">Reset password</a></p>
+  <p>This link expires in 1 hour. If you did not request this, you can ignore this email.</p>
+</body></html>""",
+        subtype="html",
+    )
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+        server.login(smtp_user, smtp_password)
+        server.send_message(message)
+
+
+async def send_password_reset_email(recipient: str, reset_url: str):
+    await asyncio.to_thread(_send_password_reset_email_sync, recipient, reset_url)
 
 def create_token(user_id: str, email: str, role: str, days: int = 7) -> str:
     payload = {
@@ -955,44 +1012,73 @@ async def logout(user=Depends(get_current_user)):
 async def forgot(req: ForgotReq):
     user = await db.users.find_one({"email": req.email.lower()})
     if user:
-        token = secrets.token_urlsafe(32)
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+
+        # Only the newest outstanding reset link remains valid.
+        await db.password_resets.update_many(
+            {"user_id": user["id"], "used": False},
+            {"$set": {"used": True}}
+        )
         await db.password_resets.insert_one({
-            "token": token, "user_id": user["id"],
+            "token_hash": token_hash,
+            "user_id": user["id"],
             "expires_at": now_utc() + timedelta(hours=1),
             "used": False,
         })
-    return {"ok": True,"message": "If the email exists, a reset link has been sent."}
+
+        frontend_url = os.environ.get(
+            "FRONTEND_URL",
+            "https://snooker-club-production.vercel.app"
+        ).rstrip("/")
+        reset_url = f"{frontend_url}/reset-password?token={quote(raw_token)}"
+
+        try:
+            await send_password_reset_email(user["email"], reset_url)
+        except Exception:
+            logging.exception("Failed to send password reset email")
+            # Keep the response generic so account existence is not disclosed.
+            raise HTTPException(
+                status_code=503,
+                detail="Unable to send the reset email right now. Please try again later."
+            )
+
+    return {"ok": True, "message": "If the email exists, a reset link has been sent."}
+
 
 @api.post("/auth/reset-password")
 async def reset(req: ResetReq):
+    validate_password_strength(req.password)
+
+    token_hash = hashlib.sha256(req.token.encode()).hexdigest()
     rec = await db.password_resets.find_one_and_update(
         {
-            "token": req.token,
+            "token_hash": token_hash,
             "used": False,
             "expires_at": {"$gt": now_utc()}
         },
-        {
-            "$set": {"used": True}
-        },
+        {"$set": {"used": True}},
         return_document=False
     )
 
     if not rec:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid or expired token"
-        )
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
 
-    await db.users.update_one(
+    result = await db.users.update_one(
         {"id": rec["user_id"]},
-        {
-            "$set": {
-                "password_hash": hash_password(req.password)
-            }
-        }
+        {"$set": {"password_hash": hash_password(req.password)}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+
+    # Invalidate any other outstanding reset links for this account.
+    await db.password_resets.update_many(
+        {"user_id": rec["user_id"], "used": False},
+        {"$set": {"used": True}}
     )
 
-    return {"ok": True}
+    return {"ok": True, "message": "Password updated successfully"}
+
 
 # ---- Users (admin) ----
 @api.get("/users")
@@ -1018,13 +1104,13 @@ async def admin_reset_password(user_id: str, body: PasswordResetAdmin, user=Depe
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
-    if len(body.password) < 4:
-        raise HTTPException(status_code=400, detail="Password must be at least 4 characters")
+    validate_password_strength(body.password)
     await db.users.update_one({"id": user_id}, {"$set": {"password_hash": hash_password(body.password)}})
     return {"ok": True, "message": f"Password reset for {target['email']}"}
 
 @api.post("/users")
 async def create_user(body: UserIn, user=Depends(require_admin)):
+    validate_password_strength(body.password)
     email = body.email.lower()
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email already exists")
